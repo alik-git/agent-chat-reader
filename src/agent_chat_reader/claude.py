@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from agent_chat_reader.models import SessionMeta, Turn
 
@@ -31,23 +32,21 @@ def _session_title(path: Path) -> str:
     return last_title
 
 
-def _extract_user_text(content: str | list) -> str | None:  # type: ignore[type-arg]
+def _extract_user_text(content: str | list[Any]) -> str | None:
     """Extract real user text; return None for tool-result carriers."""
     if isinstance(content, str):
         return content.strip() or None
-    if isinstance(content, list):
-        has_tool_result = any(
-            b.get("type") == "tool_result" for b in content if isinstance(b, dict)
-        )
-        if has_tool_result:
-            return None
-        text = " ".join(
-            b.get("text", "")
-            for b in content
-            if isinstance(b, dict) and b.get("type") == "text"
-        ).strip()
-        return text or None
-    return None
+    has_tool_result = any(
+        b.get("type") == "tool_result" for b in content if isinstance(b, dict)
+    )
+    if has_tool_result:
+        return None
+    text = " ".join(
+        b.get("text", "")
+        for b in content
+        if isinstance(b, dict) and b.get("type") == "text"
+    ).strip()
+    return text or None
 
 
 def list_sessions() -> list[SessionMeta]:
@@ -142,7 +141,7 @@ def read_turns(
     return _apply_tail(turns, tail)
 
 
-def _format_tool_call(block: dict) -> str:  # type: ignore[type-arg]
+def _format_tool_call(block: dict[str, Any]) -> str:
     """Format a tool_use block as a short bracketed summary."""
     name = block.get("name", "?")
     inp = block.get("input", {})

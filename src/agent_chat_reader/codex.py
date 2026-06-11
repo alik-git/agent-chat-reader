@@ -21,7 +21,7 @@ def is_subagent(path: Path) -> bool:
                     if payload.get("thread_source") == "subagent":
                         return True
                     source = payload.get("source", {})
-                    return isinstance(source, dict) and "subagent" in source
+                    return bool(isinstance(source, dict) and "subagent" in source)
             except Exception:
                 pass
     return False
@@ -37,7 +37,8 @@ def _first_user_message(path: Path) -> str:
                     rec.get("type") == "event_msg"
                     and rec.get("payload", {}).get("type") == "user_message"
                 ):
-                    return rec["payload"].get("message", "").replace("\n", " ")[:80]
+                    msg: str = rec["payload"].get("message", "")
+                    return msg.replace("\n", " ")[:80]
             except Exception:
                 pass
     return ""
