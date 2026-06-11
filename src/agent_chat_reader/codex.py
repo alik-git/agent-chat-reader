@@ -148,4 +148,4 @@ def _apply_tail(turns: list[Turn], tail: int | None) -> list[Turn]:
     user_indices = [i for i, t in enumerate(turns) if t.role == "USER"]
     if tail >= len(user_indices):
         return turns
-    return turns[user_indices[-tail]:]
+    return turns[user_indices[-tail] :]

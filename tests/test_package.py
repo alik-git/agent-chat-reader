@@ -15,6 +15,7 @@ from agent_chat_reader.models import Turn
 
 # ── Version ───────────────────────────────────────────────────────────────────
 
+
 def test_version() -> None:
     """Package version is a non-empty string."""
     assert isinstance(agent_chat_reader.__version__, str)
@@ -31,6 +32,7 @@ def test_cli_version(capsys: pytest.CaptureFixture[str]) -> None:
 
 # ── Codex parsing ─────────────────────────────────────────────────────────────
 
+
 def _write_jsonl(path: Path, records: list[dict]) -> None:
     """Write a list of dicts as JSONL."""
     with path.open("w") as fh:
@@ -44,15 +46,30 @@ _SESSION_FILE = "rollout-2026-01-01T00-00-00-019eae7d-da44-7413-8eb7-52d87219b1d
 def test_codex_read_turns_basic(tmp_path: Path) -> None:
     """Extracts user and agent turns from a minimal Codex session."""
     session = tmp_path / _SESSION_FILE
-    _write_jsonl(session, [
-        {"type": "session_meta", "payload": {"thread_source": "user"}},
-        {"type": "event_msg", "timestamp": "2026-01-01T00:00:00Z",
-         "payload": {"type": "user_message", "message": "hello"}},
-        {"type": "event_msg", "timestamp": "2026-01-01T00:00:01Z",
-         "payload": {"type": "agent_message", "message": "hi there"}},
-        {"type": "response_item", "timestamp": "2026-01-01T00:00:02Z",
-         "payload": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}},
-    ])
+    _write_jsonl(
+        session,
+        [
+            {"type": "session_meta", "payload": {"thread_source": "user"}},
+            {
+                "type": "event_msg",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "payload": {"type": "user_message", "message": "hello"},
+            },
+            {
+                "type": "event_msg",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "payload": {"type": "agent_message", "message": "hi there"},
+            },
+            {
+                "type": "response_item",
+                "timestamp": "2026-01-01T00:00:02Z",
+                "payload": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "ok"}],
+                },
+            },
+        ],
+    )
     turns = read_turns(session)
     assert turns[0] == Turn("USER", "hello", "2026-01-01T00:00:00Z")
     assert turns[1] == Turn("AGENT", "hi there", "2026-01-01T00:00:01Z")
@@ -62,14 +79,29 @@ def test_codex_read_turns_basic(tmp_path: Path) -> None:
 def test_codex_deduplicates_agent_and_response_item(tmp_path: Path) -> None:
     """agent_message and response_item with same text are deduplicated."""
     session = tmp_path / _SESSION_FILE
-    _write_jsonl(session, [
-        {"type": "event_msg", "timestamp": "t1",
-         "payload": {"type": "user_message", "message": "hi"}},
-        {"type": "event_msg", "timestamp": "t2",
-         "payload": {"type": "agent_message", "message": "same text"}},
-        {"type": "response_item", "timestamp": "t3",
-         "payload": {"role": "assistant", "content": [{"type": "text", "text": "same text"}]}},
-    ])
+    _write_jsonl(
+        session,
+        [
+            {
+                "type": "event_msg",
+                "timestamp": "t1",
+                "payload": {"type": "user_message", "message": "hi"},
+            },
+            {
+                "type": "event_msg",
+                "timestamp": "t2",
+                "payload": {"type": "agent_message", "message": "same text"},
+            },
+            {
+                "type": "response_item",
+                "timestamp": "t3",
+                "payload": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "same text"}],
+                },
+            },
+        ],
+    )
     turns = read_turns(session)
     agent_turns = [t for t in turns if t.role == "AGENT"]
     assert len(agent_turns) == 1
@@ -79,11 +111,17 @@ def test_codex_deduplicates_agent_and_response_item(tmp_path: Path) -> None:
 def test_codex_skips_empty_messages(tmp_path: Path) -> None:
     """Empty user/agent messages are not emitted as turns."""
     session = tmp_path / _SESSION_FILE
-    _write_jsonl(session, [
-        {"type": "event_msg", "payload": {"type": "user_message", "message": "  "}},
-        {"type": "event_msg", "payload": {"type": "agent_message", "message": ""}},
-        {"type": "event_msg", "payload": {"type": "user_message", "message": "real"}},
-    ])
+    _write_jsonl(
+        session,
+        [
+            {"type": "event_msg", "payload": {"type": "user_message", "message": "  "}},
+            {"type": "event_msg", "payload": {"type": "agent_message", "message": ""}},
+            {
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": "real"},
+            },
+        ],
+    )
     turns = read_turns(session)
     assert len(turns) == 1
     assert turns[0].text == "real"
@@ -118,6 +156,7 @@ def test_apply_tail_none_returns_all() -> None:
 
 # ── Claude parsing ────────────────────────────────────────────────────────────
 
+
 def test_claude_extract_user_text_string() -> None:
     """Plain string content is returned as-is."""
     assert _extract_user_text("hello") == "hello"
@@ -141,6 +180,7 @@ def test_claude_extract_user_text_text_block() -> None:
 
 
 # ── CLI smoke ─────────────────────────────────────────────────────────────────
+
 
 def test_cli_no_args_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
     """Calling main() with no args prints help and exits 0."""

@@ -30,7 +30,7 @@ def fmt_mtime(mtime: float) -> str:
 def print_turn(turn: Turn) -> None:
     """Print a single conversation turn with a header rule."""
     ts_str = f"  {fmt_ts(turn.timestamp)}" if turn.timestamp else ""
-    print(f"\n{'─'*60}")
+    print(f"\n{'─' * 60}")
     print(f"[{turn.role}]{ts_str}")
     print("─" * 60)
     text = turn.text
@@ -59,7 +59,7 @@ def print_find_result(
     max_hits: int = 4,
 ) -> None:
     """Print a single session's find results."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"[{session.source.upper()}] {session.id}  {fmt_mtime(session.mtime)}")
     if session.title:
         print(f'  "{session.title[:60]}"')

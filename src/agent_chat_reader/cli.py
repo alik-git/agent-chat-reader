@@ -118,7 +118,7 @@ def cmd_read(
     for turn in turns:
         print_turn(turn)
 
-    print(f"\n{'─'*60}")
+    print(f"\n{'─' * 60}")
     print(f"Total turns: {len(turns)}")
     return 0
 
@@ -130,27 +130,42 @@ def main(argv: list[str] | None = None) -> int:
         description="Read and search Codex CLI and Claude Code chat history.",
     )
     p.add_argument(
-        "--version", action="version", version=f"agent-chat-reader {__version__}",
+        "--version",
+        action="version",
+        version=f"agent-chat-reader {__version__}",
     )
     p.add_argument("session", nargs="?", help="Session ID or file path to read")
     p.add_argument("--list", "-l", action="store_true", help="List recent sessions")
     p.add_argument(
-        "--find", "-f", metavar="KEYWORD", help="Search sessions for keyword",
+        "--find",
+        "-f",
+        metavar="KEYWORD",
+        help="Search sessions for keyword",
     )
     p.add_argument("--source", choices=["codex", "claude"], help="Filter to one source")
     p.add_argument(
-        "--verbose", "-v", action="store_true",
+        "--verbose",
+        "-v",
+        action="store_true",
         help="Include tool call summaries (Claude sessions)",
     )
     p.add_argument(
-        "--tail", "-n", type=int, metavar="N", help="Show only the last N user turns",
+        "--tail",
+        "-n",
+        type=int,
+        metavar="N",
+        help="Show only the last N user turns",
     )
     p.add_argument(
-        "--include-subagents", action="store_true",
+        "--include-subagents",
+        action="store_true",
         help="Include guardian/subagent sessions",
     )
     p.add_argument(
-        "--limit", type=int, default=40, help="Max sessions for --list (default: 40)",
+        "--limit",
+        type=int,
+        default=40,
+        help="Max sessions for --list (default: 40)",
     )
 
     args = p.parse_args(argv)
