@@ -3,28 +3,29 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "mypackage"
+name = "agent-chat-reader"
 version = "0.1.0"
-description = "Minimal Python package template."
+description = "Read and search Codex CLI and Claude Code chat history from the terminal."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
-  { name = "Your Name", email = "you@example.com" },
+  { name = "Ali K", email = "alikgithb@gmail.com" },
 ]
 maintainers = [
-  { name = "Your Name", email = "you@example.com" },
+  { name = "Ali K", email = "alikgithb@gmail.com" },
 ]
-keywords = ["python", "template", "package"]
+keywords = ["cli", "developer-tools", "codex", "claude", "chat-history", "ai-agents"]
 classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Typing :: Typed",
 ]
-dependencies = [
-  "colorlog>=6.10",
-]
+dependencies = []
 
 [project.optional-dependencies]
 dev = [
@@ -36,15 +37,15 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/mypackage"]
+packages = ["src/agent_chat_reader"]
 
 [project.scripts]
-mypackage = "mypackage.cli:main"
+agent-chat-reader = "agent_chat_reader.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/alik-git/python_package_template"
-Repository = "https://github.com/alik-git/python_package_template"
-Issues = "https://github.com/alik-git/python_package_template/issues"
+Homepage = "https://github.com/alik-git/agent-chat-reader"
+Repository = "https://github.com/alik-git/agent-chat-reader"
+Issues = "https://github.com/alik-git/agent-chat-reader/issues"
 
 [tool.ruff]
 line-length = 88
@@ -52,9 +53,6 @@ target-version = "py311"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-# This template uses a fairly strict Ruff setup by default. The less universal
-# rule families are marked below; comment them out if they are too noisy for a
-# new project.
 extend-select = [
   # Core Python style and modernization.
   "E",       # pycodestyle errors
@@ -105,14 +103,23 @@ extend-select = [
 ignore = [
   # typing.cast(SomeType, value) is clearer than quoted type names.
   "TC006",
+  # Broad except / except-pass / except-continue are intentional in JSONL
+  # parsing loops where a single malformed line must not abort the whole read.
+  "BLE001",
+  "S110",
+  "S112",
+  # Turn and SessionMeta are used at runtime (instantiated, not just annotated),
+  # so TC001/TC003 false-positive on them.
+  "TC001",
+  "TC003",
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Do not flag assert statements in tests.
-"tests/**/*.py" = ["S101"]
+# Do not flag assert statements, missing docs, or long data lines in tests.
+"tests/**/*.py" = ["S101", "ARG", "D", "E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["mypackage"]
+known-first-party = ["agent_chat_reader"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -122,27 +129,20 @@ docstring-code-format = true
 
 [tool.mypy]
 python_version = "3.11"
-files = ["src/mypackage"]
-
-# Type-check function bodies even before every function is fully annotated.
+files = ["src/agent_chat_reader"]
 check_untyped_defs = true
 no_implicit_optional = true
 strict_equality = true
-
-# High-signal warnings without full mypy strict mode.
 warn_redundant_casts = true
 warn_return_any = true
 warn_unreachable = true
 warn_unused_configs = true
 warn_unused_ignores = true
-
-# Missing packages still fail as import-not-found. This only suppresses the
-# weaker "installed but has no stubs/py.typed marker" error for third-party
-# packages.
 ignore_missing_imports = false
 follow_imports = "silent"
 disable_error_code = ["import-untyped"]
-
-# Make local and CI output easier to read and easier to suppress precisely.
 show_error_codes = true
 pretty = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
