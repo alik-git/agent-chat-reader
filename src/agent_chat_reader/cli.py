@@ -8,7 +8,12 @@ from pathlib import Path
 
 from agent_chat_reader import __version__, claude, codex
 from agent_chat_reader.models import SessionMeta
-from agent_chat_reader.output import print_find_result, print_session_list, print_turn
+from agent_chat_reader.output import (
+    FindHit,
+    print_find_result,
+    print_session_list,
+    print_turn,
+)
 
 
 def _find_session(session_id: str) -> tuple[Path, str] | None:
@@ -47,13 +52,18 @@ def cmd_list(
     return 0
 
 
+def _title_key(title: str) -> str:
+    """Normalise a session title for dedup grouping."""
+    return title.strip()[:80].lower()
+
+
 def cmd_find(
     keyword: str,
     *,
     source_filter: str | None,
     include_subagents: bool,
 ) -> int:
-    """Search sessions for a keyword."""
+    """Search sessions for a keyword, deduplicating continuation sessions."""
     sessions: list[SessionMeta] = []
     if source_filter != "claude":
         sessions += codex.list_sessions(include_subagents=include_subagents)
@@ -62,7 +72,10 @@ def cmd_find(
 
     sessions = sorted(sessions, key=lambda s: s.mtime, reverse=True)
     keyword_lower = keyword.lower()
-    found_any = False
+
+    # Collect hits per session, then group by title to deduplicate continuations.
+    # Each group keeps the most-recent session's metadata as the representative.
+    groups: dict[str, tuple[SessionMeta, list[FindHit], int]] = {}
 
     for s in sessions:
         try:
@@ -73,17 +86,30 @@ def cmd_find(
         except Exception:
             continue
 
-        hits = [
-            (t.role, t.text[:120].replace("\n", " "))
+        hits: list[FindHit] = [
+            (t.role, t.text[:120].replace("\n", " "), t.timestamp)
             for t in turns
             if keyword_lower in t.text.lower()
         ]
-        if hits:
-            found_any = True
-            print_find_result(s, hits)
+        if not hits:
+            continue
 
-    if not found_any:
+        key = _title_key(s.title)
+        if key not in groups:
+            groups[key] = (s, hits, 1)
+        else:
+            rep, existing_hits, count = groups[key]
+            # Merge hits, keeping the most-recent session as representative.
+            rep = s if s.mtime > rep.mtime else rep
+            groups[key] = (rep, existing_hits + hits, count + 1)
+
+    if not groups:
         print(f"No sessions found containing {keyword!r}")
+        return 0
+
+    for rep, hits, count in groups.values():
+        print_find_result(rep, hits, merged_count=count)
+
     return 0
 
 

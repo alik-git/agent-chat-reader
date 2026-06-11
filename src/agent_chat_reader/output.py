@@ -10,6 +10,9 @@ from agent_chat_reader.models import SessionMeta, Turn
 _MAX_TURN_LEN = 3000
 _WRAP_THRESHOLD = 400
 
+# Type alias: (role, snippet, timestamp)
+FindHit = tuple[str, str, str]
+
 
 def fmt_ts(ts_str: str) -> str:
     """Format an ISO timestamp to a short local time string."""
@@ -54,16 +57,21 @@ def print_session_list(sessions: list[SessionMeta]) -> None:
 
 def print_find_result(
     session: SessionMeta,
-    hits: list[tuple[str, str]],
+    hits: list[FindHit],
     *,
     max_hits: int = 4,
+    merged_count: int = 1,
 ) -> None:
     """Print a single session's find results."""
     print(f"\n{'=' * 70}")
-    print(f"[{session.source.upper()}] {session.id}  {fmt_mtime(session.mtime)}")
+    merged = f"  [{merged_count} sessions]" if merged_count > 1 else ""
+    print(
+        f"[{session.source.upper()}] {session.id}  {fmt_mtime(session.mtime)}{merged}"
+    )
     if session.title:
         print(f'  "{session.title[:60]}"')
-    for role, snippet in hits[:max_hits]:
-        print(f"  [{role}] {snippet!r}")
+    for role, snippet, ts in hits[:max_hits]:
+        ts_str = f" {fmt_ts(ts)}" if ts else ""
+        print(f"  [{role}{ts_str}] {snippet!r}")
     if len(hits) > max_hits:
         print(f"  ... and {len(hits) - max_hits} more matches")
