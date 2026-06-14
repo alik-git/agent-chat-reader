@@ -58,12 +58,12 @@ def _title_key(title: str) -> str:
 
 
 def cmd_find(
-    keyword: str,
+    keywords: list[str],
     *,
     source_filter: str | None,
     include_subagents: bool,
 ) -> int:
-    """Search sessions for a keyword, deduplicating continuation sessions."""
+    """Search sessions for keywords (AND logic), deduplicating continuation sessions."""
     sessions: list[SessionMeta] = []
     if source_filter != "claude":
         sessions += codex.list_sessions(include_subagents=include_subagents)
@@ -71,7 +71,12 @@ def cmd_find(
         sessions += claude.list_sessions()
 
     sessions = sorted(sessions, key=lambda s: s.mtime, reverse=True)
-    keyword_lower = keyword.lower()
+    keywords_lower = [k.lower() for k in keywords]
+
+    def _turn_matches(text: str) -> bool:
+        """Return True if the turn contains all keywords (AND)."""
+        text_lower = text.lower()
+        return all(k in text_lower for k in keywords_lower)
 
     # Collect hits per session, then group by title to deduplicate continuations.
     # Each group keeps the most-recent session's metadata as the representative.
@@ -89,7 +94,7 @@ def cmd_find(
         hits: list[FindHit] = [
             (t.role, t.text[:120].replace("\n", " "), t.timestamp)
             for t in turns
-            if keyword_lower in t.text.lower()
+            if _turn_matches(t.text)
         ]
         if not hits:
             continue
@@ -99,12 +104,12 @@ def cmd_find(
             groups[key] = (s, hits, 1)
         else:
             rep, existing_hits, count = groups[key]
-            # Merge hits, keeping the most-recent session as representative.
             rep = s if s.mtime > rep.mtime else rep
             groups[key] = (rep, existing_hits + hits, count + 1)
 
     if not groups:
-        print(f"No sessions found containing {keyword!r}")
+        query = " AND ".join(f"{k!r}" for k in keywords)
+        print(f"No sessions found containing {query}")
         return 0
 
     for rep, hits, count in groups.values():
@@ -165,8 +170,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--find",
         "-f",
+        nargs="+",
         metavar="KEYWORD",
-        help="Search sessions for keyword",
+        help="Search sessions (multiple keywords = AND logic)",
     )
     p.add_argument("--source", choices=["codex", "claude"], help="Filter to one source")
     p.add_argument(
@@ -204,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.find:
         return cmd_find(
-            args.find,
+            args.find,  # list[str] from nargs="+"
             source_filter=args.source,
             include_subagents=args.include_subagents,
         )
