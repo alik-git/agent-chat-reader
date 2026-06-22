@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 from agent_chat_reader import __version__, claude, codex
-from agent_chat_reader.models import SessionMeta
+from agent_chat_reader.models import SessionMeta, Turn
 from agent_chat_reader.output import (
     FindHit,
+    elapsed_seconds_between,
+    fmt_ts,
     print_find_result,
     print_session_list,
     print_turn,
@@ -124,6 +127,8 @@ def cmd_read(
     verbose: bool,
     include_subagents: bool,
     tail: int | None,
+    show_timestamps: bool,
+    output_format: str,
 ) -> int:
     """Read a specific session as clean conversation."""
     result = _find_session(session_id)
@@ -133,7 +138,6 @@ def cmd_read(
 
     path, source = result
     size_kb = path.stat().st_size // 1024
-    print(f"Source: {source.upper()}  |  {path.name}  |  {size_kb}KB")
 
     if source == "codex":
         turns = codex.read_turns(path, tail=tail)
@@ -142,16 +146,67 @@ def cmd_read(
             path, verbose=verbose, include_subagents=include_subagents, tail=tail
         )
 
+    if output_format == "json":
+        print(_json_session(source=source, path=path, size_kb=size_kb, turns=turns))
+        return 0
+
+    print(f"Source: {source.upper()}  |  {path.name}  |  {size_kb}KB")
+
     if not turns:
         print("(no conversation turns found)")
         return 0
 
+    previous_turn = None
     for turn in turns:
-        print_turn(turn)
+        print_turn(
+            turn,
+            show_timestamps=show_timestamps,
+            previous_turn=previous_turn,
+        )
+        previous_turn = turn
 
     print(f"\n{'─' * 60}")
     print(f"Total turns: {len(turns)}")
     return 0
+
+
+def _json_session(*, source: str, path: Path, size_kb: int, turns: list[Turn]) -> str:
+    """Serialize a read session as structured JSON."""
+    previous_turn = None
+    turn_records: list[dict[str, object]] = []
+    for turn in turns:
+        elapsed_seconds: int | None = (
+            None
+            if previous_turn is None
+            else elapsed_seconds_between(previous_turn, turn)
+        )
+        turn_records.append(
+            {
+                "role": turn.role,
+                "timestamp": turn.timestamp or None,
+                "local_time": fmt_ts(turn.timestamp) or None,
+                "elapsed_seconds": elapsed_seconds,
+                "text": turn.text,
+            }
+        )
+        previous_turn = turn
+
+    payload = {
+        "source": source,
+        "session_id": _session_id_for_path(path, source),
+        "path": str(path),
+        "size_kb": size_kb,
+        "total_turns": len(turns),
+        "turns": turn_records,
+    }
+    return json.dumps(payload, indent=2)
+
+
+def _session_id_for_path(path: Path, source: str) -> str:
+    """Return the source-specific session id for a session file."""
+    if source == "codex":
+        return codex._session_id_from_path(path)
+    return path.stem
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -194,6 +249,25 @@ def main(argv: list[str] | None = None) -> int:
         help="Include guardian/subagent sessions",
     )
     p.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format for session reads (default: text)",
+    )
+    p.add_argument(
+        "--show-timestamps",
+        action="store_true",
+        dest="show_timestamps",
+        default=True,
+        help="Show message timestamps and elapsed gaps in session reads",
+    )
+    p.add_argument(
+        "--hide-timestamps",
+        action="store_false",
+        dest="show_timestamps",
+        help="Hide message timestamps and elapsed gaps in session reads",
+    )
+    p.add_argument(
         "--limit",
         type=int,
         default=40,
@@ -220,6 +294,8 @@ def main(argv: list[str] | None = None) -> int:
             verbose=args.verbose,
             include_subagents=args.include_subagents,
             tail=args.tail,
+            show_timestamps=args.show_timestamps,
+            output_format=args.format,
         )
 
     p.print_help()

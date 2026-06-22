@@ -40,6 +40,8 @@ agent-chat-reader --find "policy_interface" --source codex
 agent-chat-reader 019eaecb
 agent-chat-reader 1bfc739b --verbose     # include tool call summaries
 agent-chat-reader 019eaecb --tail 5      # last 5 user turns only
+agent-chat-reader 019eaecb --hide-timestamps
+agent-chat-reader 019eaecb --format json
 ```
 
 ## What it filters out
@@ -61,7 +63,17 @@ Use `--include-subagents` to see everything.
 | `--verbose` / `-v` | Include brief tool call summaries (Claude sessions) |
 | `--tail N` / `-n N` | Show only the last N user turns of a session |
 | `--include-subagents` | Include guardian/subagent sessions |
+| `--format text\|json` | Output format for session reads |
+| `--hide-timestamps` | Hide message timestamps and elapsed-gap labels |
 | `--limit N` | Max sessions shown by `--list` (default: 40) |
+
+Session reads show timestamps by default. Elapsed labels use the current
+speaker's role, such as `(agent took 8s)` or `(user took 4m)`, and only report
+the time since the previous visible message.
+
+Use `--format json` when another agent or script needs stable structured
+fields instead of terminal separators. JSON turns include `timestamp`,
+`local_time`, `elapsed_seconds`, `role`, and `text`.
 
 ## Session storage locations
 

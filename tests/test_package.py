@@ -9,9 +9,10 @@ import pytest
 
 import agent_chat_reader
 from agent_chat_reader.claude import _extract_user_text
-from agent_chat_reader.cli import main
+from agent_chat_reader.cli import _json_session, main
 from agent_chat_reader.codex import _apply_tail, _session_id_from_path, read_turns
 from agent_chat_reader.models import Turn
+from agent_chat_reader.output import elapsed_seconds_between, fmt_elapsed, print_turn
 
 # ── Version ───────────────────────────────────────────────────────────────────
 
@@ -152,6 +153,92 @@ def test_apply_tail_none_returns_all() -> None:
     """tail=None returns all turns unchanged."""
     turns = [Turn("USER", "x", ""), Turn("AGENT", "y", "")]
     assert _apply_tail(turns, tail=None) == turns
+
+
+# ── Output formatting ────────────────────────────────────────────────────────
+
+
+def test_print_turn_shows_timestamp_by_default(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The default transcript view includes timing context."""
+    print_turn(Turn("USER", "hello", "2026-01-01T12:00:00Z"))
+    out = capsys.readouterr().out
+    assert "[USER]" in out
+    assert "2026-01" in out
+
+
+def test_print_turn_can_hide_timestamp(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Timestamp display can be disabled for quieter transcript reads."""
+    print_turn(
+        Turn("USER", "hello", "2026-01-01T00:00:00Z"),
+        show_timestamps=False,
+    )
+    out = capsys.readouterr().out
+    assert "[USER]" in out
+    assert "2026-01" not in out
+
+
+def test_print_turn_can_show_agent_elapsed_time(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Timestamp mode shows elapsed time for the current speaker."""
+    previous_turn = Turn("USER", "hello", "2026-01-01T00:00:00Z")
+    print_turn(
+        Turn("AGENT", "hi", "2026-01-01T00:02:05Z"),
+        show_timestamps=True,
+        previous_turn=previous_turn,
+    )
+    out = capsys.readouterr().out
+    assert "[AGENT]" in out
+    assert "(agent took 2m)" in out
+
+
+def test_print_turn_can_show_user_elapsed_time(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """User messages show elapsed time without inferring idle state."""
+    previous_turn = Turn("AGENT", "question?", "2026-01-01T00:00:00Z")
+    print_turn(
+        Turn("USER", "answer", "2026-01-01T00:30:00Z"),
+        show_timestamps=True,
+        previous_turn=previous_turn,
+    )
+    assert "(user took 30m)" in capsys.readouterr().out
+
+
+def test_fmt_elapsed_handles_long_gaps() -> None:
+    """Elapsed durations stay compact for long sessions."""
+    from datetime import timedelta
+
+    assert fmt_elapsed(timedelta(days=1, hours=2, minutes=3)) == "1d 2h"
+
+
+def test_elapsed_seconds_between_returns_machine_readable_gap() -> None:
+    """Elapsed gap calculations are available without parsing display text."""
+    previous_turn = Turn("USER", "hello", "2026-01-01T00:00:00Z")
+    turn = Turn("AGENT", "hi", "2026-01-01T00:02:05Z")
+    assert elapsed_seconds_between(previous_turn, turn) == 125
+
+
+def test_json_session_includes_structured_timing_fields(tmp_path: Path) -> None:
+    """JSON output exposes stable fields for agents and scripts."""
+    session = tmp_path / _SESSION_FILE
+    turns = [
+        Turn("USER", "hello", "2026-01-01T00:00:00Z"),
+        Turn("AGENT", "hi", "2026-01-01T00:02:05Z"),
+    ]
+    payload = json.loads(
+        _json_session(source="codex", path=session, size_kb=12, turns=turns)
+    )
+    assert payload["source"] == "codex"
+    assert payload["size_kb"] == 12
+    assert payload["total_turns"] == 2
+    assert payload["turns"][0]["elapsed_seconds"] is None
+    assert payload["turns"][1]["elapsed_seconds"] == 125
+    assert payload["turns"][1]["text"] == "hi"
 
 
 # ── Claude parsing ────────────────────────────────────────────────────────────
