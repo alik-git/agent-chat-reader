@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import textwrap
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from agent_chat_reader.models import SessionMeta, Turn
 
@@ -18,11 +18,77 @@ def fmt_ts(ts_str: str) -> str:
     """Format an ISO timestamp to a short local time string."""
     if not ts_str:
         return ""
-    try:
-        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+    dt = _parse_ts(ts_str)
+    if dt is not None:
         return dt.astimezone().strftime("%Y-%m-%d %H:%M")
+    return ts_str[:16]
+
+
+def _parse_ts(ts_str: str) -> datetime | None:
+    """Parse an ISO timestamp, returning None for non-ISO placeholders."""
+    try:
+        return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
     except ValueError:
-        return ts_str[:16]
+        return None
+
+
+def fmt_elapsed(delta: timedelta) -> str:
+    """Format an elapsed duration compactly."""
+    seconds = max(0, int(delta.total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    minutes %= 60
+    if hours < 24:
+        return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+    days = hours // 24
+    hours %= 24
+    return f"{days}d {hours}h" if hours else f"{days}d"
+
+
+def _gap_label(previous_turn: Turn, turn: Turn) -> str:
+    """Describe the elapsed-time direction without assigning blame."""
+    gap_kind = gap_kind_for(previous_turn, turn)
+    return f"{gap_kind} gap"
+
+
+def gap_kind_for(previous_turn: Turn, turn: Turn) -> str:
+    """Return the elapsed-time gap kind between two turns."""
+    if turn.role == "USER":
+        return "user"
+    if previous_turn.role == "USER":
+        return "response"
+    return "agent"
+
+
+def elapsed_seconds_between(previous_turn: Turn, turn: Turn) -> int | None:
+    """Return elapsed seconds between two turns, if both timestamps parse."""
+    current_dt = _parse_ts(turn.timestamp)
+    previous_dt = _parse_ts(previous_turn.timestamp)
+    if current_dt is None or previous_dt is None:
+        return None
+    return max(0, int((current_dt - previous_dt).total_seconds()))
+
+
+def _timestamp_suffix(turn: Turn, previous_turn: Turn | None) -> str:
+    """Return the optional timestamp/gap suffix for a turn header."""
+    timestamp = fmt_ts(turn.timestamp)
+    if not timestamp:
+        return ""
+
+    if previous_turn is None:
+        return f"  {timestamp}"
+
+    elapsed_seconds = elapsed_seconds_between(previous_turn, turn)
+    if elapsed_seconds is None:
+        return f"  {timestamp}"
+
+    elapsed = fmt_elapsed(timedelta(seconds=elapsed_seconds))
+    label = _gap_label(previous_turn, turn)
+    return f"  {timestamp}  (+{elapsed} {label})"
 
 
 def fmt_mtime(mtime: float) -> str:
@@ -30,9 +96,14 @@ def fmt_mtime(mtime: float) -> str:
     return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")  # noqa: DTZ006
 
 
-def print_turn(turn: Turn) -> None:
+def print_turn(
+    turn: Turn,
+    *,
+    show_timestamps: bool = True,
+    previous_turn: Turn | None = None,
+) -> None:
     """Print a single conversation turn with a header rule."""
-    ts_str = f"  {fmt_ts(turn.timestamp)}" if turn.timestamp else ""
+    ts_str = _timestamp_suffix(turn, previous_turn) if show_timestamps else ""
     print(f"\n{'─' * 60}")
     print(f"[{turn.role}]{ts_str}")
     print("─" * 60)
