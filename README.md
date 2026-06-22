@@ -67,14 +67,13 @@ Use `--include-subagents` to see everything.
 | `--hide-timestamps` | Hide message timestamps and elapsed-gap labels |
 | `--limit N` | Max sessions shown by `--list` (default: 40) |
 
-Session reads show timestamps by default. Gap labels are descriptive:
-`response gap` means time from a user message to the next assistant message,
-`agent gap` means time between assistant messages, and `user gap` means time
-before the next user message.
+Session reads show timestamps by default. Elapsed labels use the current
+speaker's role, such as `(agent took 8s)` or `(user took 4m)`, and only report
+the time since the previous visible message.
 
 Use `--format json` when another agent or script needs stable structured
 fields instead of terminal separators. JSON turns include `timestamp`,
-`local_time`, `elapsed_seconds`, `gap_kind`, `role`, and `text`.
+`local_time`, `elapsed_seconds`, `role`, and `text`.
 
 ## Session storage locations
 

@@ -49,21 +49,6 @@ def fmt_elapsed(delta: timedelta) -> str:
     return f"{days}d {hours}h" if hours else f"{days}d"
 
 
-def _gap_label(previous_turn: Turn, turn: Turn) -> str:
-    """Describe the elapsed-time direction without assigning blame."""
-    gap_kind = gap_kind_for(previous_turn, turn)
-    return f"{gap_kind} gap"
-
-
-def gap_kind_for(previous_turn: Turn, turn: Turn) -> str:
-    """Return the elapsed-time gap kind between two turns."""
-    if turn.role == "USER":
-        return "user"
-    if previous_turn.role == "USER":
-        return "response"
-    return "agent"
-
-
 def elapsed_seconds_between(previous_turn: Turn, turn: Turn) -> int | None:
     """Return elapsed seconds between two turns, if both timestamps parse."""
     current_dt = _parse_ts(turn.timestamp)
@@ -87,8 +72,8 @@ def _timestamp_suffix(turn: Turn, previous_turn: Turn | None) -> str:
         return f"  {timestamp}"
 
     elapsed = fmt_elapsed(timedelta(seconds=elapsed_seconds))
-    label = _gap_label(previous_turn, turn)
-    return f"  {timestamp}  (+{elapsed} {label})"
+    role = turn.role.lower()
+    return f"  {timestamp}  ({role} took {elapsed})"
 
 
 def fmt_mtime(mtime: float) -> str:

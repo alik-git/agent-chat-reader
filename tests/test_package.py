@@ -181,10 +181,10 @@ def test_print_turn_can_hide_timestamp(
     assert "2026-01" not in out
 
 
-def test_print_turn_can_show_timestamp_and_response_gap(
+def test_print_turn_can_show_agent_elapsed_time(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Timestamp mode shows neutral elapsed context for agent responses."""
+    """Timestamp mode shows elapsed time for the current speaker."""
     previous_turn = Turn("USER", "hello", "2026-01-01T00:00:00Z")
     print_turn(
         Turn("AGENT", "hi", "2026-01-01T00:02:05Z"),
@@ -193,18 +193,20 @@ def test_print_turn_can_show_timestamp_and_response_gap(
     )
     out = capsys.readouterr().out
     assert "[AGENT]" in out
-    assert "+2m response gap" in out
+    assert "(agent took 2m)" in out
 
 
-def test_print_turn_labels_user_idle_gap(capsys: pytest.CaptureFixture[str]) -> None:
-    """User messages after agent messages are labeled as user gaps."""
+def test_print_turn_can_show_user_elapsed_time(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """User messages show elapsed time without inferring idle state."""
     previous_turn = Turn("AGENT", "question?", "2026-01-01T00:00:00Z")
     print_turn(
         Turn("USER", "answer", "2026-01-01T00:30:00Z"),
         show_timestamps=True,
         previous_turn=previous_turn,
     )
-    assert "+30m user gap" in capsys.readouterr().out
+    assert "(user took 30m)" in capsys.readouterr().out
 
 
 def test_fmt_elapsed_handles_long_gaps() -> None:
@@ -235,9 +237,7 @@ def test_json_session_includes_structured_timing_fields(tmp_path: Path) -> None:
     assert payload["size_kb"] == 12
     assert payload["total_turns"] == 2
     assert payload["turns"][0]["elapsed_seconds"] is None
-    assert payload["turns"][0]["gap_kind"] is None
     assert payload["turns"][1]["elapsed_seconds"] == 125
-    assert payload["turns"][1]["gap_kind"] == "response"
     assert payload["turns"][1]["text"] == "hi"
 
 

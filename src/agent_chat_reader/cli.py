@@ -13,7 +13,6 @@ from agent_chat_reader.output import (
     FindHit,
     elapsed_seconds_between,
     fmt_ts,
-    gap_kind_for,
     print_find_result,
     print_session_list,
     print_turn,
@@ -174,21 +173,19 @@ def cmd_read(
 def _json_session(*, source: str, path: Path, size_kb: int, turns: list[Turn]) -> str:
     """Serialize a read session as structured JSON."""
     previous_turn = None
-    turn_records = []
+    turn_records: list[dict[str, object]] = []
     for turn in turns:
-        elapsed_seconds = (
+        elapsed_seconds: int | None = (
             None
             if previous_turn is None
             else elapsed_seconds_between(previous_turn, turn)
         )
-        gap_kind = None if previous_turn is None else gap_kind_for(previous_turn, turn)
         turn_records.append(
             {
                 "role": turn.role,
                 "timestamp": turn.timestamp or None,
                 "local_time": fmt_ts(turn.timestamp) or None,
                 "elapsed_seconds": elapsed_seconds,
-                "gap_kind": gap_kind,
                 "text": turn.text,
             }
         )
