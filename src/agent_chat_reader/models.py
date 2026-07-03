@@ -17,7 +17,7 @@ class Turn(NamedTuple):
 class SessionMeta(NamedTuple):
     """Metadata for a single chat session."""
 
-    source: str  # "codex" | "claude"
+    source: str  # "codex" | "codex-side" | "claude"
     id: str
     path: Path
     mtime: float
