@@ -32,6 +32,7 @@ agent-chat-reader --list
 ```bash
 agent-chat-reader --find "sim2sim"
 agent-chat-reader --find "policy_interface" --source codex
+agent-chat-reader --find "side chat phrase" --source codex-side
 ```
 
 **Read a specific session** by UUID prefix:
@@ -49,6 +50,7 @@ agent-chat-reader 019eaecb --format json
 The raw JSONL files are very noisy. This tool extracts only:
 
 - **Codex**: `user_message` events, `agent_message` events, and full `response_item` assistant text. Guardian/subagent sessions (auto-approval bots) are hidden by default.
+- **Codex side chats**: user submissions and assistant text reconstructed from the local Codex runtime log database. Known internal helper sessions are hidden by default.
 - **Claude Code**: real user turns (not tool-result carriers), and assistant text blocks (not thinking blocks or tool calls). Sidechain sub-agent turns are hidden by default.
 
 Use `--include-subagents` to see everything.
@@ -59,7 +61,7 @@ Use `--include-subagents` to see everything.
 |------|-------------|
 | `--list` / `-l` | List recent sessions from both sources |
 | `--find KEYWORD` / `-f` | Search all sessions for a keyword |
-| `--source codex\|claude` | Filter to one source |
+| `--source codex\|codex-side\|claude` | Filter to one source. `codex` includes normal Codex sessions and side chats |
 | `--verbose` / `-v` | Include brief tool call summaries (Claude sessions) |
 | `--tail N` / `-n N` | Show only the last N user turns of a session |
 | `--include-subagents` | Include guardian/subagent sessions |
@@ -80,7 +82,11 @@ fields instead of terminal separators. JSON turns include `timestamp`,
 | Agent | Path |
 |-------|------|
 | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` |
+| Codex side chats | `~/.codex/logs_2.sqlite` |
 | Claude Code | `~/.claude/projects/*/*.jsonl` |
+
+Codex side chats are log-backed rather than normal rollout transcripts, so the
+tool labels them as `codex-side` in list and search output.
 
 ## Development
 

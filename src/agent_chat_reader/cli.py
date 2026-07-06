@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from agent_chat_reader import __version__, claude, codex
+from agent_chat_reader import __version__, claude, codex, codex_side
 from agent_chat_reader.models import SessionMeta, Turn
 from agent_chat_reader.output import (
     FindHit,
@@ -19,22 +19,74 @@ from agent_chat_reader.output import (
 )
 
 
-def _find_session(session_id: str) -> tuple[Path, str] | None:
-    """Locate a session file by ID fragment, returning (path, source)."""
+def _find_session(
+    session_id: str,
+    *,
+    include_subagents: bool = False,
+) -> SessionMeta | None:
+    """Locate a session by ID fragment."""
     p = Path(session_id)
     if p.exists():
         source = "codex" if ".codex" in str(p) else "claude"
-        return p, source
+        stat = p.stat()
+        return SessionMeta(
+            source=source,
+            id=_session_id_for_path(p, source),
+            path=p,
+            mtime=stat.st_mtime,
+            size_kb=stat.st_size // 1024,
+            title=p.name,
+        )
 
     codex_matches = list(codex.CODEX_SESSIONS.rglob(f"*{session_id}*.jsonl"))
     if codex_matches:
-        return sorted(codex_matches)[-1], "codex"
+        path = sorted(codex_matches)[-1]
+        stat = path.stat()
+        return SessionMeta(
+            source="codex",
+            id=codex._session_id_from_path(path),
+            path=path,
+            mtime=stat.st_mtime,
+            size_kb=stat.st_size // 1024,
+            title=path.name,
+        )
 
     claude_matches = list(claude.CLAUDE_PROJECTS.rglob(f"*{session_id}*.jsonl"))
     if claude_matches:
-        return sorted(claude_matches)[-1], "claude"
+        path = sorted(claude_matches)[-1]
+        stat = path.stat()
+        return SessionMeta(
+            source="claude",
+            id=path.stem,
+            path=path,
+            mtime=stat.st_mtime,
+            size_kb=stat.st_size // 1024,
+            title=path.name,
+        )
+
+    side_chat = codex_side.find_session(
+        session_id,
+        include_subagents=include_subagents,
+    )
+    if side_chat is not None:
+        return side_chat
 
     return None
+
+
+def _include_codex_sessions(source_filter: str | None) -> bool:
+    """Return True if normal Codex sessions should be included."""
+    return source_filter in (None, "codex")
+
+
+def _include_codex_side_chats(source_filter: str | None) -> bool:
+    """Return True if Codex side chats should be included."""
+    return source_filter in (None, "codex", "codex-side")
+
+
+def _include_claude_sessions(source_filter: str | None) -> bool:
+    """Return True if Claude sessions should be included."""
+    return source_filter in (None, "claude")
 
 
 def cmd_list(
@@ -45,9 +97,11 @@ def cmd_list(
 ) -> int:
     """List recent sessions from both sources."""
     sessions: list[SessionMeta] = []
-    if source_filter != "claude":
+    if _include_codex_sessions(source_filter):
         sessions += codex.list_sessions(include_subagents=include_subagents)
-    if source_filter != "codex":
+    if _include_codex_side_chats(source_filter):
+        sessions += codex_side.list_sessions(include_subagents=include_subagents)
+    if _include_claude_sessions(source_filter):
         sessions += claude.list_sessions()
 
     sessions = sorted(sessions, key=lambda s: s.mtime, reverse=True)[:limit]
@@ -68,9 +122,11 @@ def cmd_find(
 ) -> int:
     """Search sessions for keywords (AND logic), deduplicating continuation sessions."""
     sessions: list[SessionMeta] = []
-    if source_filter != "claude":
+    if _include_codex_sessions(source_filter):
         sessions += codex.list_sessions(include_subagents=include_subagents)
-    if source_filter != "codex":
+    if _include_codex_side_chats(source_filter):
+        sessions += codex_side.list_sessions(include_subagents=include_subagents)
+    if _include_claude_sessions(source_filter):
         sessions += claude.list_sessions()
 
     sessions = sorted(sessions, key=lambda s: s.mtime, reverse=True)
@@ -87,10 +143,11 @@ def cmd_find(
 
     for s in sessions:
         try:
-            if s.source == "codex":
-                turns = codex.read_turns(s.path)
-            else:
-                turns = claude.read_turns(s.path)
+            turns = _read_session_turns(
+                s,
+                verbose=False,
+                include_subagents=include_subagents,
+            )
         except Exception:
             continue
 
@@ -131,26 +188,31 @@ def cmd_read(
     output_format: str,
 ) -> int:
     """Read a specific session as clean conversation."""
-    result = _find_session(session_id)
-    if result is None:
+    session = _find_session(session_id, include_subagents=include_subagents)
+    if session is None:
         print(f"Session not found: {session_id}", file=sys.stderr)
         return 1
 
-    path, source = result
-    size_kb = path.stat().st_size // 1024
-
-    if source == "codex":
-        turns = codex.read_turns(path, tail=tail)
-    else:
-        turns = claude.read_turns(
-            path, verbose=verbose, include_subagents=include_subagents, tail=tail
-        )
+    turns = _read_session_turns(
+        session,
+        verbose=verbose,
+        include_subagents=include_subagents,
+        tail=tail,
+    )
 
     if output_format == "json":
-        print(_json_session(source=source, path=path, size_kb=size_kb, turns=turns))
+        print(
+            _json_session(
+                source=session.source,
+                session_id=session.id,
+                path=session.path,
+                size_kb=session.size_kb,
+                turns=turns,
+            )
+        )
         return 0
 
-    print(f"Source: {source.upper()}  |  {path.name}  |  {size_kb}KB")
+    print(f"Source: {session.source.upper()}  |  {session.id}  |  {session.size_kb}KB")
 
     if not turns:
         print("(no conversation turns found)")
@@ -170,7 +232,34 @@ def cmd_read(
     return 0
 
 
-def _json_session(*, source: str, path: Path, size_kb: int, turns: list[Turn]) -> str:
+def _read_session_turns(
+    session: SessionMeta,
+    *,
+    verbose: bool,
+    include_subagents: bool,
+    tail: int | None = None,
+) -> list[Turn]:
+    """Read turns for any supported session source."""
+    if session.source == "codex":
+        return codex.read_turns(session.path, tail=tail)
+    if session.source == codex_side.CODEX_SIDE_SOURCE:
+        return codex_side.read_turns(session.id, tail=tail)
+    return claude.read_turns(
+        session.path,
+        verbose=verbose,
+        include_subagents=include_subagents,
+        tail=tail,
+    )
+
+
+def _json_session(
+    *,
+    source: str,
+    path: Path,
+    size_kb: int,
+    turns: list[Turn],
+    session_id: str | None = None,
+) -> str:
     """Serialize a read session as structured JSON."""
     previous_turn = None
     turn_records: list[dict[str, object]] = []
@@ -193,7 +282,7 @@ def _json_session(*, source: str, path: Path, size_kb: int, turns: list[Turn]) -
 
     payload = {
         "source": source,
-        "session_id": _session_id_for_path(path, source),
+        "session_id": session_id or _session_id_for_path(path, source),
         "path": str(path),
         "size_kb": size_kb,
         "total_turns": len(turns),
@@ -206,6 +295,8 @@ def _session_id_for_path(path: Path, source: str) -> str:
     """Return the source-specific session id for a session file."""
     if source == "codex":
         return codex._session_id_from_path(path)
+    if source == codex_side.CODEX_SIDE_SOURCE:
+        return path.stem
     return path.stem
 
 
@@ -229,7 +320,11 @@ def main(argv: list[str] | None = None) -> int:
         metavar="KEYWORD",
         help="Search sessions (multiple keywords = AND logic)",
     )
-    p.add_argument("--source", choices=["codex", "claude"], help="Filter to one source")
+    p.add_argument(
+        "--source",
+        choices=["codex", "codex-side", "claude"],
+        help="Filter to one source",
+    )
     p.add_argument(
         "--verbose",
         "-v",

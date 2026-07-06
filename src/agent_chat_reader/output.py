@@ -101,14 +101,14 @@ def print_turn(
 
 def print_session_list(sessions: list[SessionMeta]) -> None:
     """Print a formatted table of sessions."""
-    print(f"{'SRC':<6} {'DATE':<16} {'SIZE':>7}  {'ID':<36}  TITLE")
-    print("─" * 100)
+    print(f"{'SRC':<10} {'DATE':<16} {'SIZE':>7}  {'ID':<36}  TITLE")
+    print("─" * 104)
     for s in sessions:
         src = s.source
         date = fmt_mtime(s.mtime)
         size = f"{s.size_kb}KB"
         title = (s.title or "(no title)")[:55]
-        print(f"{src:<6} {date:<16} {size:>7}  {s.id:<36}  {title}")
+        print(f"{src:<10} {date:<16} {size:>7}  {s.id:<36}  {title}")
 
 
 def print_find_result(
