@@ -27,7 +27,7 @@ def fmt_ts(ts_str: str) -> str:
 def _parse_ts(ts_str: str) -> datetime | None:
     """Parse an ISO timestamp, returning None for non-ISO placeholders."""
     try:
-        return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        return datetime.fromisoformat(ts_str)
     except ValueError:
         return None
 

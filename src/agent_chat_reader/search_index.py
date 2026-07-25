@@ -176,7 +176,7 @@ def _timestamp_value(timestamp: str) -> float | None:
     if not timestamp:
         return None
     try:
-        return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp()
+        return datetime.fromisoformat(timestamp).timestamp()
     except ValueError:
         return None
 

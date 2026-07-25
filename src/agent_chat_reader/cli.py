@@ -41,7 +41,7 @@ def _find_session(
 
     codex_matches = list(codex.CODEX_SESSIONS.rglob(f"*{session_id}*.jsonl"))
     if codex_matches:
-        path = sorted(codex_matches)[-1]
+        path = max(codex_matches)
         stat = path.stat()
         return SessionMeta(
             source="codex",
@@ -54,7 +54,7 @@ def _find_session(
 
     claude_matches = list(claude.CLAUDE_PROJECTS.rglob(f"*{session_id}*.jsonl"))
     if claude_matches:
-        path = sorted(claude_matches)[-1]
+        path = max(claude_matches)
         stat = path.stat()
         return SessionMeta(
             source="claude",
@@ -113,7 +113,7 @@ def _positive_int(value: str) -> int:
 def _parse_since(value: str) -> float:
     """Parse a local ISO date or an ISO timestamp for search filtering."""
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(
             "must be an ISO date or timestamp, for example 2026-07-01"
