@@ -584,7 +584,9 @@ def test_search_reuses_unchanged_file_index_and_refreshes_changed_file(
     )
     _write_search_session(path, user_text="alpha marker", agent_text="initial reply")
     real_read_turns_from = codex.read_turns_from
+    real_session_metadata = codex.session_metadata
     read_count = 0
+    metadata_count = 0
 
     def counting_read_turns_from(
         path: Path,
@@ -601,7 +603,14 @@ def test_search_reuses_unchanged_file_index_and_refreshes_changed_file(
             last_assistant_text=last_assistant_text,
         )
 
+    def counting_session_metadata(path: Path) -> codex.SessionMetadata:
+        """Count content metadata reads while preserving the production parser."""
+        nonlocal metadata_count
+        metadata_count += 1
+        return real_session_metadata(path)
+
     monkeypatch.setattr(codex, "read_turns_from", counting_read_turns_from)
+    monkeypatch.setattr(codex, "session_metadata", counting_session_metadata)
     options = {
         "sources": ("codex",),
         "include_subagents": False,
@@ -611,6 +620,7 @@ def test_search_reuses_unchanged_file_index_and_refreshes_changed_file(
     assert search.search_sessions(["alpha"], **options)
     assert search.search_sessions(["alpha"], **options)
     assert read_count == 1
+    assert metadata_count == 1
 
     with path.open("a") as fh:
         fh.write(
@@ -625,6 +635,160 @@ def test_search_reuses_unchanged_file_index_and_refreshes_changed_file(
         )
     assert search.search_sessions(["beta"], **options)
     assert read_count == 2
+    assert metadata_count == 2
+
+
+def test_search_caches_metadata_for_excluded_codex_subagents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unchanged excluded rollouts do not reopen solely to recheck visibility."""
+    codex_sessions, _logs_db = _patch_all_search_sources(monkeypatch, tmp_path)
+    path = _codex_session_path(
+        codex_sessions,
+        "019eae7d-da44-7413-8eb7-52d87219b1d3",
+    )
+    _write_jsonl(
+        path,
+        [
+            {"type": "session_meta", "payload": {"thread_source": "subagent"}},
+            {
+                "type": "event_msg",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "payload": {"type": "user_message", "message": "hidden marker"},
+            },
+        ],
+    )
+    real_session_metadata = codex.session_metadata
+    metadata_count = 0
+
+    def counting_session_metadata(path: Path) -> codex.SessionMetadata:
+        """Count visibility reads for a rollout excluded from search."""
+        nonlocal metadata_count
+        metadata_count += 1
+        return real_session_metadata(path)
+
+    monkeypatch.setattr(codex, "session_metadata", counting_session_metadata)
+    options = {
+        "sources": ("codex",),
+        "include_subagents": False,
+        "limit": 40,
+        "since": None,
+    }
+    assert not search.search_sessions(["hidden"], **options)
+    assert not search.search_sessions(["hidden"], **options)
+    assert metadata_count == 1
+
+    included_results = search.search_sessions(
+        ["hidden"],
+        sources=("codex",),
+        include_subagents=True,
+        limit=40,
+        since=None,
+    )
+    assert [result.session.id for result in included_results] == [
+        "019eae7d-da44-7413-8eb7-52d87219b1d3"
+    ]
+    assert metadata_count == 1
+
+
+def test_search_detects_same_size_same_mtime_file_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new inode invalidates cached metadata and turns even with equal stats."""
+    codex_sessions, _logs_db = _patch_all_search_sources(monkeypatch, tmp_path)
+    path = _codex_session_path(
+        codex_sessions,
+        "019eae7d-da44-7413-8eb7-52d87219b1d3",
+    )
+    _write_search_session(path, user_text="alpha marker", agent_text="same reply")
+    options = {
+        "sources": ("codex",),
+        "include_subagents": False,
+        "limit": 40,
+        "since": None,
+    }
+    assert search.search_sessions(["alpha"], **options)
+    original_stat = path.stat()
+
+    replacement = codex_sessions / "replacement.jsonl"
+    _write_search_session(
+        replacement,
+        user_text="bravo marker",
+        agent_text="same reply",
+    )
+    assert replacement.stat().st_size == original_stat.st_size
+    os.utime(
+        replacement,
+        ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+    )
+    replacement.replace(path)
+
+    results = search.search_sessions(["bravo"], **options)
+    assert [result.session.id for result in results] == [
+        "019eae7d-da44-7413-8eb7-52d87219b1d3"
+    ]
+
+
+def test_search_reuses_and_refreshes_claude_title_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claude titles are cached while appended title records still take effect."""
+    _patch_all_search_sources(monkeypatch, tmp_path)
+    project_dir = claude.CLAUDE_PROJECTS / "project"
+    project_dir.mkdir()
+    path = project_dir / "claude-session.jsonl"
+    _write_jsonl(
+        path,
+        [
+            {"type": "ai-title", "aiTitle": "Original title"},
+            {
+                "type": "user",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"content": "alpha marker"},
+            },
+        ],
+    )
+    real_session_title = claude.session_title
+    title_count = 0
+
+    def counting_session_title(path: Path) -> str:
+        """Count title scans while preserving the production parser."""
+        nonlocal title_count
+        title_count += 1
+        return real_session_title(path)
+
+    monkeypatch.setattr(claude, "session_title", counting_session_title)
+    options = {
+        "sources": ("claude",),
+        "include_subagents": False,
+        "limit": 40,
+        "since": None,
+    }
+    first_results = search.search_sessions(["alpha"], **options)
+    second_results = search.search_sessions(["alpha"], **options)
+    assert first_results[0].session.title == "Original title"
+    assert second_results[0].session.title == "Original title"
+    assert title_count == 1
+
+    with path.open("a") as fh:
+        fh.write(json.dumps({"type": "ai-title", "aiTitle": "Updated title"}) + "\n")
+        fh.write(
+            json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": "2026-01-01T00:00:01Z",
+                    "message": {"content": "beta marker"},
+                }
+            )
+            + "\n"
+        )
+
+    updated_results = search.search_sessions(["beta"], **options)
+    assert updated_results[0].session.title == "Updated title"
+    assert title_count == 2
 
 
 def test_side_search_uses_log_cursor_after_initial_build(

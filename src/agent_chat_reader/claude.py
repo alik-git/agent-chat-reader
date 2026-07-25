@@ -16,7 +16,7 @@ def _decode_project_path(dirname: str) -> str:
     return dirname.replace("-", "/")
 
 
-def _session_title(path: Path) -> str:
+def session_title(path: Path) -> str:
     """Return the last ai-title from a Claude session file."""
     last_title = ""
     with path.open() as fh:
@@ -66,7 +66,7 @@ def list_sessions() -> list[SessionMeta]:
                     path=f,
                     mtime=stat.st_mtime,
                     size_kb=stat.st_size // 1024,
-                    title=_session_title(f) or "(untitled)",
+                    title=session_title(f) or "(untitled)",
                 )
             )
     return sorted(results, key=lambda s: s.mtime, reverse=True)

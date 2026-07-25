@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
@@ -11,7 +12,7 @@ from typing import NamedTuple
 from agent_chat_reader import claude, codex, codex_side
 from agent_chat_reader.models import SessionMeta, Turn
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _CACHE_ENV = "AGENT_CHAT_READER_CACHE_DIR"
 
 
@@ -21,6 +22,31 @@ class _FileState(NamedTuple):
     identity: str
     fingerprint: str
     size: int
+    mtime: float
+
+
+class _FileCandidate(NamedTuple):
+    """One JSONL source discovered without opening its contents."""
+
+    source: str
+    session_id: str
+    path: Path
+    state: _FileState
+
+
+class _FileMetadata(NamedTuple):
+    """Cached content-derived metadata for one JSONL source file."""
+
+    title: str
+    is_subagent: bool
+
+
+class _IndexedFile(NamedTuple):
+    """A searchable session plus its current source-file state."""
+
+    session: SessionMeta
+    state: _FileState
+    is_subagent: bool
 
 
 def default_index_path() -> Path:
@@ -40,6 +66,7 @@ def _drop_schema(conn: sqlite3.Connection) -> None:
         DROP TABLE IF EXISTS messages_fts;
         DROP TABLE IF EXISTS messages;
         DROP TABLE IF EXISTS sessions;
+        DROP TABLE IF EXISTS source_files;
         DROP TABLE IF EXISTS metadata;
         """
     )
@@ -52,6 +79,15 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE metadata (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        );
+
+        CREATE TABLE source_files (
+            source TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            title TEXT NOT NULL,
+            is_subagent INTEGER NOT NULL,
+            PRIMARY KEY (source, session_id)
         );
 
         CREATE TABLE sessions (
@@ -155,10 +191,142 @@ def _file_state(path: Path) -> _FileState | None:
     except OSError:
         return None
     resolved = path.resolve()
+    identity = f"{resolved}:{stat.st_dev}:{stat.st_ino}"
     return _FileState(
-        identity=f"{resolved}:{stat.st_dev}:{stat.st_ino}",
-        fingerprint=f"{resolved}:{stat.st_mtime_ns}:{stat.st_size}",
+        identity=identity,
+        fingerprint=f"{identity}:{stat.st_mtime_ns}:{stat.st_size}",
         size=stat.st_size,
+        mtime=stat.st_mtime,
+    )
+
+
+def _source_paths(source: str) -> Iterator[Path]:
+    """Yield JSONL paths for one file-backed source without reading them."""
+    if source == "codex":
+        if codex.CODEX_SESSIONS.exists():
+            yield from codex.CODEX_SESSIONS.rglob("*.jsonl")
+        return
+
+    if not claude.CLAUDE_PROJECTS.exists():
+        return
+    for project_dir in claude.CLAUDE_PROJECTS.iterdir():
+        if project_dir.is_dir():
+            yield from project_dir.glob("*.jsonl")
+
+
+def _discover_source_files(source: str) -> list[_FileCandidate]:
+    """Discover file-backed sessions using one stat call per path."""
+    candidates: list[_FileCandidate] = []
+    for path in _source_paths(source):
+        state = _file_state(path)
+        if state is None:
+            continue
+        session_id = (
+            codex._session_id_from_path(path) if source == "codex" else path.stem
+        )
+        candidates.append(
+            _FileCandidate(
+                source=source,
+                session_id=session_id,
+                path=path,
+                state=state,
+            )
+        )
+    return candidates
+
+
+def _read_file_metadata(candidate: _FileCandidate) -> _FileMetadata:
+    """Read title and visibility metadata from a new or changed source file."""
+    if candidate.source == "codex":
+        metadata = codex.session_metadata(candidate.path)
+        return _FileMetadata(
+            title=metadata.title,
+            is_subagent=metadata.is_subagent,
+        )
+    return _FileMetadata(
+        title=claude.session_title(candidate.path) or "(untitled)",
+        is_subagent=False,
+    )
+
+
+def _cached_file_metadata(
+    conn: sqlite3.Connection,
+    *,
+    source: str,
+) -> dict[str, sqlite3.Row]:
+    """Load cached source fingerprints and content-derived metadata."""
+    return {
+        str(row["session_id"]): row
+        for row in conn.execute(
+            """
+            SELECT session_id, fingerprint, title, is_subagent
+            FROM source_files
+            WHERE source = ?
+            """,
+            (source,),
+        )
+    }
+
+
+def _store_file_metadata(
+    conn: sqlite3.Connection,
+    *,
+    candidate: _FileCandidate,
+    metadata: _FileMetadata,
+) -> None:
+    """Store content-derived metadata under the file's current fingerprint."""
+    conn.execute(
+        """
+        INSERT INTO source_files(
+            source, session_id, fingerprint, title, is_subagent
+        )
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(source, session_id) DO UPDATE SET
+            fingerprint = excluded.fingerprint,
+            title = excluded.title,
+            is_subagent = excluded.is_subagent
+        """,
+        (
+            candidate.source,
+            candidate.session_id,
+            candidate.state.fingerprint,
+            metadata.title,
+            int(metadata.is_subagent),
+        ),
+    )
+
+
+def _prepare_source_file(
+    conn: sqlite3.Connection,
+    *,
+    candidate: _FileCandidate,
+    cached: sqlite3.Row | None,
+) -> _IndexedFile | None:
+    """Reuse cached metadata or inspect one new or changed source file."""
+    if cached is not None and str(cached["fingerprint"]) == candidate.state.fingerprint:
+        metadata = _FileMetadata(
+            title=str(cached["title"]),
+            is_subagent=bool(cached["is_subagent"]),
+        )
+    else:
+        metadata = _read_file_metadata(candidate)
+        refreshed_state = _file_state(candidate.path)
+        if refreshed_state is None:
+            return None
+        candidate = candidate._replace(state=refreshed_state)
+        _store_file_metadata(conn, candidate=candidate, metadata=metadata)
+
+    return _IndexedFile(
+        session=SessionMeta(
+            source=candidate.source,
+            id=candidate.session_id,
+            path=candidate.path,
+            mtime=candidate.state.mtime,
+            size_kb=candidate.state.size // 1024,
+            title=metadata.title,
+        ),
+        state=candidate.state,
+        is_subagent=metadata.is_subagent,
     )
 
 
@@ -348,6 +516,26 @@ def _remove_missing_sessions(
             )
 
 
+def _remove_missing_source_files(
+    conn: sqlite3.Connection,
+    *,
+    source: str,
+    current_ids: set[str],
+) -> None:
+    """Delete metadata for source files that are no longer present."""
+    rows = conn.execute(
+        "SELECT session_id FROM source_files WHERE source = ?",
+        (source,),
+    )
+    for row in rows:
+        session_id = str(row["session_id"])
+        if session_id not in current_ids:
+            conn.execute(
+                "DELETE FROM source_files WHERE source = ? AND session_id = ?",
+                (source, session_id),
+            )
+
+
 def _refresh_file_source(
     conn: sqlite3.Connection,
     *,
@@ -356,11 +544,8 @@ def _refresh_file_source(
 ) -> None:
     """Refresh changed Codex or Claude JSONL sessions only."""
     visibility = int(include_subagents)
-    sessions = (
-        codex.list_sessions(include_subagents=include_subagents)
-        if source == "codex"
-        else claude.list_sessions()
-    )
+    candidates = _discover_source_files(source)
+    cached_metadata = _cached_file_metadata(conn, source=source)
     existing = {
         str(row["session_id"]): row
         for row in conn.execute(
@@ -372,18 +557,24 @@ def _refresh_file_source(
             (visibility, source),
         )
     }
-    current_ids = {session.id for session in sessions}
-    _remove_missing_sessions(
-        conn,
-        visibility=visibility,
-        source=source,
-        current_ids=current_ids,
-    )
 
-    for session in sessions:
-        state = _file_state(session.path)
-        if state is None:
+    current_file_ids: set[str] = set()
+    current_session_ids: set[str] = set()
+    for candidate in candidates:
+        indexed_file = _prepare_source_file(
+            conn,
+            candidate=candidate,
+            cached=cached_metadata.get(candidate.session_id),
+        )
+        if indexed_file is None:
             continue
+        current_file_ids.add(indexed_file.session.id)
+        if source == "codex" and indexed_file.is_subagent and not include_subagents:
+            continue
+
+        session = indexed_file.session
+        state = indexed_file.state
+        current_session_ids.add(session.id)
         indexed = existing.get(session.id)
         if indexed is not None and str(indexed["fingerprint"]) == state.fingerprint:
             continue
@@ -424,6 +615,18 @@ def _refresh_file_source(
             indexed_bytes=indexed_bytes,
             turns=turns,
         )
+
+    _remove_missing_sessions(
+        conn,
+        visibility=visibility,
+        source=source,
+        current_ids=current_session_ids,
+    )
+    _remove_missing_source_files(
+        conn,
+        source=source,
+        current_ids=current_file_ids,
+    )
 
 
 def _side_session_meta(
