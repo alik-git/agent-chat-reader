@@ -1,11 +1,11 @@
 # AGENTS.md
 
-Repo-specific instructions for agents working with the `mypackage` package.
+Repo-specific instructions for agents working with `agent-chat-reader`.
 
 ## Package Conventions
 
-- Keep importable package code under `src/mypackage/`.
-- Put CLI entrypoint behavior in `src/mypackage/cli.py`.
+- Keep importable package code under `src/agent_chat_reader/`.
+- Put CLI entrypoint behavior in `src/agent_chat_reader/cli.py`.
 
 ## Validation
 

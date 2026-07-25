@@ -1,15 +1,8 @@
 # API
 
-Document the package's public Python API here.
+`agent-chat-reader` currently treats its command-line interface as the public
+API. The Python modules under `agent_chat_reader` are implementation details and
+may evolve with the local Codex and Claude history formats.
 
-## `do_useful_thing`
-
-```python
-import mypackage
-
-result = mypackage.do_useful_thing("world")
-```
-
-`do_useful_thing` is the starter public function exposed by this template.
-Replace it with the functions or classes that should make up the package's
-public API.
+Use `agent-chat-reader --format json <session>` when another agent or script
+needs stable structured transcript data.
