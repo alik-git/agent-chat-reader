@@ -90,10 +90,29 @@ def read_turns(
     Returns:
         List of Turn namedtuples in conversation order.
     """
+    turns, _offset = read_turns_from(
+        path,
+        offset=0,
+        verbose=verbose,
+        include_subagents=include_subagents,
+    )
+    return _apply_tail(turns, tail)
+
+
+def read_turns_from(
+    path: Path,
+    *,
+    offset: int,
+    verbose: bool = False,
+    include_subagents: bool = False,
+) -> tuple[list[Turn], int]:
+    """Read complete Claude records after a safe byte offset."""
     turns: list[Turn] = []
 
-    with path.open() as fh:
+    with path.open("rb") as fh:
+        fh.seek(offset)
         for raw in fh:
+            line_start = fh.tell() - len(raw)
             stripped = raw.strip()
             if not stripped:
                 continue
@@ -134,11 +153,11 @@ def read_turns(
                         full_text = (full_text + "\n" + " ".join(tool_parts)).strip()
                     if full_text:
                         turns.append(Turn("CLAUDE", full_text, ts))
-
             except Exception:
-                pass
+                if not raw.endswith(b"\n"):
+                    return turns, line_start
 
-    return _apply_tail(turns, tail)
+        return turns, fh.tell()
 
 
 def _format_tool_call(block: dict[str, Any]) -> str:

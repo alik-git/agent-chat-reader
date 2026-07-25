@@ -93,11 +93,23 @@ def read_turns(path: Path, *, tail: int | None = None) -> list[Turn]:
     Returns:
         List of Turn namedtuples in conversation order.
     """
-    turns: list[Turn] = []
-    last_assistant_text: str | None = None
+    turns, _offset = read_turns_from(path, offset=0)
+    return _apply_tail(turns, tail)
 
-    with path.open() as fh:
+
+def read_turns_from(
+    path: Path,
+    *,
+    offset: int,
+    last_assistant_text: str | None = None,
+) -> tuple[list[Turn], int]:
+    """Read complete Codex records after a safe byte offset."""
+    turns: list[Turn] = []
+
+    with path.open("rb") as fh:
+        fh.seek(offset)
         for raw in fh:
+            line_start = fh.tell() - len(raw)
             stripped = raw.strip()
             if not stripped:
                 continue
@@ -135,11 +147,11 @@ def read_turns(path: Path, *, tail: int | None = None) -> list[Turn]:
                         if text and text != last_assistant_text:
                             turns.append(Turn("AGENT", text, ts))
                             last_assistant_text = text
-
             except Exception:
-                pass
+                if not raw.endswith(b"\n"):
+                    return turns, line_start
 
-    return _apply_tail(turns, tail)
+        return turns, fh.tell()
 
 
 def _apply_tail(turns: list[Turn], tail: int | None) -> list[Turn]:

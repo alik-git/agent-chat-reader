@@ -3,18 +3,29 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
 import pytest
 
 import agent_chat_reader
-from agent_chat_reader import codex, codex_side
+from agent_chat_reader import claude, codex, codex_side, search
 from agent_chat_reader.claude import _extract_user_text
 from agent_chat_reader.cli import _json_session, main
 from agent_chat_reader.codex import _apply_tail, _session_id_from_path, read_turns
 from agent_chat_reader.models import Turn
 from agent_chat_reader.output import elapsed_seconds_between, fmt_elapsed, print_turn
+
+
+@pytest.fixture(autouse=True)
+def _isolate_search_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep every test's derived search index inside its temporary directory."""
+    monkeypatch.setenv("AGENT_CHAT_READER_CACHE_DIR", str(tmp_path / "cache"))
+
 
 # ── Version ───────────────────────────────────────────────────────────────────
 
@@ -157,6 +168,26 @@ def test_apply_tail_none_returns_all() -> None:
     assert _apply_tail(turns, tail=None) == turns
 
 
+def test_codex_byte_cursor_waits_for_complete_appended_record(tmp_path: Path) -> None:
+    """Incremental reads never advance past a partially written JSONL record."""
+    session = tmp_path / _SESSION_FILE
+    _write_search_session(session, user_text="first", agent_text="reply")
+    _turns, offset = codex.read_turns_from(session, offset=0)
+    partial = '{"type":"event_msg","payload":{"type":"user_message","message":"second"}'
+    with session.open("a") as fh:
+        fh.write(partial)
+
+    turns, unchanged_offset = codex.read_turns_from(session, offset=offset)
+    assert turns == []
+    assert unchanged_offset == offset
+
+    with session.open("a") as fh:
+        fh.write("}\n")
+    turns, final_offset = codex.read_turns_from(session, offset=offset)
+    assert [turn.text for turn in turns] == ["second"]
+    assert final_offset == session.stat().st_size
+
+
 # ── Codex side-chat parsing ──────────────────────────────────────────────────
 
 
@@ -259,6 +290,51 @@ def _patch_codex_side_paths(
     monkeypatch.setattr(codex_side, "CODEX_LOGS_DB", logs_db)
     monkeypatch.setattr(codex_side, "CODEX_STATE_DB", state_db)
     return logs_db, state_db
+
+
+def _patch_all_search_sources(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> tuple[Path, Path]:
+    """Point every searchable source at empty temporary fixtures."""
+    codex_sessions = tmp_path / "codex_sessions"
+    claude_projects = tmp_path / "claude_projects"
+    codex_sessions.mkdir()
+    claude_projects.mkdir()
+    monkeypatch.setattr(codex, "CODEX_SESSIONS", codex_sessions)
+    monkeypatch.setattr(claude, "CLAUDE_PROJECTS", claude_projects)
+    logs_db, _state_db = _patch_codex_side_paths(monkeypatch, tmp_path)
+    return codex_sessions, logs_db
+
+
+def _codex_session_path(root: Path, session_id: str) -> Path:
+    """Return a valid rollout filename for one test session id."""
+    return root / f"rollout-2026-01-01T00-00-00-{session_id}.jsonl"
+
+
+def _write_search_session(
+    path: Path,
+    *,
+    user_text: str,
+    agent_text: str,
+) -> None:
+    """Write one minimal searchable Codex conversation."""
+    _write_jsonl(
+        path,
+        [
+            {"type": "session_meta", "payload": {"thread_source": "user"}},
+            {
+                "type": "event_msg",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "payload": {"type": "user_message", "message": user_text},
+            },
+            {
+                "type": "event_msg",
+                "timestamp": "2026-01-01T00:00:01Z",
+                "payload": {"type": "agent_message", "message": agent_text},
+            },
+        ],
+    )
 
 
 def test_codex_side_lists_human_side_chats_and_filters_helpers(
@@ -397,6 +473,320 @@ def test_cli_read_can_emit_codex_side_json(
     assert payload["source"] == "codex-side"
     assert payload["session_id"] == "side-thread"
     assert payload["turns"][0]["text"] == "read me"
+
+
+# ── Indexed search ────────────────────────────────────────────────────────────
+
+
+def test_search_matches_terms_across_turns_and_centers_snippets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AND applies to a session and snippets expose late message matches."""
+    codex_sessions, _logs_db = _patch_all_search_sources(monkeypatch, tmp_path)
+    session_id = "019eae7d-da44-7413-8eb7-52d87219b1d3"
+    path = _codex_session_path(codex_sessions, session_id)
+    _write_search_session(
+        path,
+        user_text="collision geometry is the first topic",
+        agent_text=f"{'prefix ' * 40}friction metadata is the second topic",
+    )
+    with path.open("a") as fh:
+        for index in range(5):
+            fh.write(
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "timestamp": f"2026-01-01T00:00:0{index + 2}Z",
+                        "payload": {
+                            "type": "agent_message",
+                            "message": f"another friction match {index}",
+                        },
+                    }
+                )
+                + "\n"
+            )
+
+    results = search.search_sessions(
+        ["collision", "friction"],
+        sources=("codex",),
+        include_subagents=False,
+        limit=40,
+        since=None,
+    )
+    visible_snippets = " ".join(hit[1] for hit in results[0].hits[:4])
+    assert "collision" in visible_snippets
+    assert "friction" in visible_snippets
+
+    assert main(["--find", "collision", "friction", "--source", "codex"]) == 0
+    out = capsys.readouterr().out
+    assert session_id in out
+    assert "collision" in out
+    assert "friction" in out
+
+
+def test_search_keeps_distinct_sessions_with_equal_titles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Equal title text never merges distinct session identities."""
+    codex_sessions, _logs_db = _patch_all_search_sources(monkeypatch, tmp_path)
+    first_id = "019eae7d-da44-7413-8eb7-52d87219b1d3"
+    second_id = "029eae7d-da44-7413-8eb7-52d87219b1d4"
+    for session_id in (first_id, second_id):
+        _write_search_session(
+            _codex_session_path(codex_sessions, session_id),
+            user_text="identical opening title",
+            agent_text="a separate conversation",
+        )
+
+    assert main(["--find", "identical opening", "--source", "codex"]) == 0
+    out = capsys.readouterr().out
+    assert first_id in out
+    assert second_id in out
+
+
+def test_search_preserves_case_insensitive_literal_substrings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The FTS path preserves legacy substring behavior without query syntax."""
+    codex_sessions, _logs_db = _patch_all_search_sources(monkeypatch, tmp_path)
+    _write_search_session(
+        _codex_session_path(
+            codex_sessions,
+            "019eae7d-da44-7413-8eb7-52d87219b1d3",
+        ),
+        user_text='Policy_Interface says "Hello"',
+        agent_text="reply",
+    )
+    results = search.search_sessions(
+        ["LICY_INT", '"Hello"'],
+        sources=("codex",),
+        include_subagents=False,
+        limit=40,
+        since=None,
+    )
+    assert len(results) == 1
+
+
+def test_search_reuses_unchanged_file_index_and_refreshes_changed_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unchanged JSONL sessions are not reparsed, while appended text is indexed."""
+    codex_sessions, _logs_db = _patch_all_search_sources(monkeypatch, tmp_path)
+    path = _codex_session_path(
+        codex_sessions,
+        "019eae7d-da44-7413-8eb7-52d87219b1d3",
+    )
+    _write_search_session(path, user_text="alpha marker", agent_text="initial reply")
+    real_read_turns_from = codex.read_turns_from
+    read_count = 0
+
+    def counting_read_turns_from(
+        path: Path,
+        *,
+        offset: int,
+        last_assistant_text: str | None = None,
+    ) -> tuple[list[Turn], int]:
+        """Count source parses while preserving the production parser."""
+        nonlocal read_count
+        read_count += 1
+        return real_read_turns_from(
+            path,
+            offset=offset,
+            last_assistant_text=last_assistant_text,
+        )
+
+    monkeypatch.setattr(codex, "read_turns_from", counting_read_turns_from)
+    options = {
+        "sources": ("codex",),
+        "include_subagents": False,
+        "limit": 40,
+        "since": None,
+    }
+    assert search.search_sessions(["alpha"], **options)
+    assert search.search_sessions(["alpha"], **options)
+    assert read_count == 1
+
+    with path.open("a") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "type": "event_msg",
+                    "timestamp": "2026-01-01T00:00:02Z",
+                    "payload": {"type": "user_message", "message": "beta marker"},
+                }
+            )
+            + "\n"
+        )
+    assert search.search_sessions(["beta"], **options)
+    assert read_count == 2
+
+
+def test_side_search_uses_log_cursor_after_initial_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Side-chat refreshes rebuild changed threads without relisting all logs."""
+    _codex_sessions, logs_db = _patch_all_search_sources(monkeypatch, tmp_path)
+    _insert_log(
+        logs_db,
+        row_id=1,
+        thread_id="side-thread",
+        target="codex_core::session::handlers",
+        body=_submission_body("alpha side marker"),
+    )
+    real_list_sessions = codex_side.list_sessions
+    list_count = 0
+
+    def counting_list_sessions(
+        *,
+        include_subagents: bool = False,
+        raise_errors: bool = False,
+    ) -> list:
+        """Count expensive full side-chat discovery calls."""
+        nonlocal list_count
+        list_count += 1
+        return real_list_sessions(
+            include_subagents=include_subagents,
+            raise_errors=raise_errors,
+        )
+
+    monkeypatch.setattr(codex_side, "list_sessions", counting_list_sessions)
+    options = {
+        "sources": ("codex-side",),
+        "include_subagents": False,
+        "limit": 40,
+        "since": None,
+    }
+    assert search.search_sessions(["alpha"], **options)
+    _insert_log(
+        logs_db,
+        row_id=2,
+        thread_id="side-thread",
+        target="codex_core::stream_events_utils",
+        body=_assistant_body("beta side marker"),
+        ts_nanos=1,
+    )
+    assert search.search_sessions(["beta"], **options)
+    assert list_count == 1
+
+
+def test_side_build_does_not_skip_rows_appended_during_discovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The saved cursor predates discovery so concurrent rows remain pending."""
+    _codex_sessions, logs_db = _patch_all_search_sources(monkeypatch, tmp_path)
+    _insert_log(
+        logs_db,
+        row_id=1,
+        thread_id="first-thread",
+        target="codex_core::session::handlers",
+        body=_submission_body("first marker", submission_id="sub-1"),
+    )
+    real_list_sessions = codex_side.list_sessions
+    inserted = False
+
+    def list_then_append(
+        *,
+        include_subagents: bool = False,
+        raise_errors: bool = False,
+    ) -> list:
+        """Simulate a new side chat arriving after the discovery snapshot."""
+        nonlocal inserted
+        sessions = real_list_sessions(
+            include_subagents=include_subagents,
+            raise_errors=raise_errors,
+        )
+        if not inserted:
+            inserted = True
+            _insert_log(
+                logs_db,
+                row_id=2,
+                thread_id="second-thread",
+                target="codex_core::session::handlers",
+                body=_submission_body("second marker", submission_id="sub-2"),
+                ts_nanos=1,
+            )
+        return sessions
+
+    monkeypatch.setattr(codex_side, "list_sessions", list_then_append)
+    options = {
+        "sources": ("codex-side",),
+        "include_subagents": False,
+        "limit": 40,
+        "since": None,
+    }
+    assert search.search_sessions(["first"], **options)
+    results = search.search_sessions(["second"], **options)
+    assert [result.session.id for result in results] == ["second-thread"]
+
+
+def test_search_limit_and_since_filter_sessions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Search honors the shared result limit and explicit activity date."""
+    codex_sessions, _logs_db = _patch_all_search_sources(monkeypatch, tmp_path)
+    old_id = "019eae7d-da44-7413-8eb7-52d87219b1d3"
+    new_id = "029eae7d-da44-7413-8eb7-52d87219b1d4"
+    old_path = _codex_session_path(codex_sessions, old_id)
+    new_path = _codex_session_path(codex_sessions, new_id)
+    for path in (old_path, new_path):
+        _write_search_session(path, user_text="dated marker", agent_text="reply")
+    os.utime(old_path, (1_767_225_600, 1_767_225_600))
+    os.utime(new_path, (1_767_398_400, 1_767_398_400))
+
+    assert (
+        main(
+            [
+                "--find",
+                "dated marker",
+                "--source",
+                "codex",
+                "--since",
+                "2026-01-02",
+                "--limit",
+                "1",
+            ]
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert new_id in out
+    assert old_id not in out
+
+
+def test_deleted_search_cache_rebuilds_automatically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The derived index remains safe to delete and recreate from sources."""
+    codex_sessions, _logs_db = _patch_all_search_sources(monkeypatch, tmp_path)
+    _write_search_session(
+        _codex_session_path(
+            codex_sessions,
+            "019eae7d-da44-7413-8eb7-52d87219b1d3",
+        ),
+        user_text="rebuild marker",
+        agent_text="reply",
+    )
+    options = {
+        "sources": ("codex",),
+        "include_subagents": False,
+        "limit": 40,
+        "since": None,
+    }
+    assert search.search_sessions(["rebuild"], **options)
+    index_path = tmp_path / "cache" / "agent-chat-reader" / "search.sqlite3"
+    index_path.unlink()
+    assert search.search_sessions(["rebuild"], **options)
 
 
 # ── Output formatting ────────────────────────────────────────────────────────
