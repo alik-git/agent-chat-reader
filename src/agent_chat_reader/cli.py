@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
 
-from agent_chat_reader import __version__, claude, codex, codex_side
+from agent_chat_reader import __version__, claude, codex, codex_side, search
 from agent_chat_reader.models import SessionMeta, Turn
 from agent_chat_reader.output import (
-    FindHit,
     elapsed_seconds_between,
     fmt_ts,
     print_find_result,
@@ -40,7 +41,7 @@ def _find_session(
 
     codex_matches = list(codex.CODEX_SESSIONS.rglob(f"*{session_id}*.jsonl"))
     if codex_matches:
-        path = sorted(codex_matches)[-1]
+        path = max(codex_matches)
         stat = path.stat()
         return SessionMeta(
             source="codex",
@@ -53,7 +54,7 @@ def _find_session(
 
     claude_matches = list(claude.CLAUDE_PROJECTS.rglob(f"*{session_id}*.jsonl"))
     if claude_matches:
-        path = sorted(claude_matches)[-1]
+        path = max(claude_matches)
         stat = path.stat()
         return SessionMeta(
             source="claude",
@@ -89,6 +90,39 @@ def _include_claude_sessions(source_filter: str | None) -> bool:
     return source_filter in (None, "claude")
 
 
+def _search_sources(source_filter: str | None) -> tuple[str, ...]:
+    """Return exact indexed sources for the CLI's source-filter semantics."""
+    sources: list[str] = []
+    if _include_codex_sessions(source_filter):
+        sources.append("codex")
+    if _include_codex_side_chats(source_filter):
+        sources.append(codex_side.CODEX_SIDE_SOURCE)
+    if _include_claude_sessions(source_filter):
+        sources.append("claude")
+    return tuple(sources)
+
+
+def _positive_int(value: str) -> int:
+    """Parse a strictly positive command-line integer."""
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
+def _parse_since(value: str) -> float:
+    """Parse a local ISO date or an ISO timestamp for search filtering."""
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "must be an ISO date or timestamp, for example 2026-07-01"
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    return parsed.timestamp()
+
+
 def cmd_list(
     *,
     source_filter: str | None,
@@ -109,71 +143,34 @@ def cmd_list(
     return 0
 
 
-def _title_key(title: str) -> str:
-    """Normalise a session title for dedup grouping."""
-    return title.strip()[:80].lower()
-
-
 def cmd_find(
     keywords: list[str],
     *,
     source_filter: str | None,
     include_subagents: bool,
+    limit: int,
+    since: float | None,
 ) -> int:
-    """Search sessions for keywords (AND logic), deduplicating continuation sessions."""
-    sessions: list[SessionMeta] = []
-    if _include_codex_sessions(source_filter):
-        sessions += codex.list_sessions(include_subagents=include_subagents)
-    if _include_codex_side_chats(source_filter):
-        sessions += codex_side.list_sessions(include_subagents=include_subagents)
-    if _include_claude_sessions(source_filter):
-        sessions += claude.list_sessions()
+    """Search the incremental index with session-level AND semantics."""
+    try:
+        results = search.search_sessions(
+            keywords,
+            sources=_search_sources(source_filter),
+            include_subagents=include_subagents,
+            limit=limit,
+            since=since,
+        )
+    except (OSError, sqlite3.Error) as exc:
+        print(f"Search index error: {exc}", file=sys.stderr)
+        return 1
 
-    sessions = sorted(sessions, key=lambda s: s.mtime, reverse=True)
-    keywords_lower = [k.lower() for k in keywords]
-
-    def _turn_matches(text: str) -> bool:
-        """Return True if the turn contains all keywords (AND)."""
-        text_lower = text.lower()
-        return all(k in text_lower for k in keywords_lower)
-
-    # Collect hits per session, then group by title to deduplicate continuations.
-    # Each group keeps the most-recent session's metadata as the representative.
-    groups: dict[str, tuple[SessionMeta, list[FindHit], int]] = {}
-
-    for s in sessions:
-        try:
-            turns = _read_session_turns(
-                s,
-                verbose=False,
-                include_subagents=include_subagents,
-            )
-        except Exception:
-            continue
-
-        hits: list[FindHit] = [
-            (t.role, t.text[:120].replace("\n", " "), t.timestamp)
-            for t in turns
-            if _turn_matches(t.text)
-        ]
-        if not hits:
-            continue
-
-        key = _title_key(s.title)
-        if key not in groups:
-            groups[key] = (s, hits, 1)
-        else:
-            rep, existing_hits, count = groups[key]
-            rep = s if s.mtime > rep.mtime else rep
-            groups[key] = (rep, existing_hits + hits, count + 1)
-
-    if not groups:
+    if not results:
         query = " AND ".join(f"{k!r}" for k in keywords)
         print(f"No sessions found containing {query}")
         return 0
 
-    for rep, hits, count in groups.values():
-        print_find_result(rep, hits, merged_count=count)
+    for result in results:
+        print_find_result(result.session, result.hits)
 
     return 0
 
@@ -364,9 +361,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument(
         "--limit",
-        type=int,
+        type=_positive_int,
         default=40,
-        help="Max sessions for --list (default: 40)",
+        help="Max sessions for --list or --find (default: 40)",
+    )
+    p.add_argument(
+        "--since",
+        type=_parse_since,
+        metavar="DATE",
+        help="Only search sessions active on or after an ISO date/timestamp",
     )
 
     args = p.parse_args(argv)
@@ -382,6 +385,8 @@ def main(argv: list[str] | None = None) -> int:
             args.find,  # list[str] from nargs="+"
             source_filter=args.source,
             include_subagents=args.include_subagents,
+            limit=args.limit,
+            since=args.since,
         )
     if args.session:
         return cmd_read(

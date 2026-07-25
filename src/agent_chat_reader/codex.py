@@ -4,44 +4,55 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import NamedTuple
 
 from agent_chat_reader.models import SessionMeta, Turn
 
 CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
 
 
-def is_subagent(path: Path) -> bool:
-    """Return True if this Codex session is a guardian/subagent session."""
+class SessionMetadata(NamedTuple):
+    """Stable metadata read from the beginning of a Codex rollout."""
+
+    title: str
+    is_subagent: bool
+
+
+def session_metadata(path: Path) -> SessionMetadata:
+    """Read a rollout's title and subagent state in one pass."""
+    title = ""
+    is_subagent = False
+    found_session_meta = False
+
     with path.open() as fh:
         for raw in fh:
             try:
                 rec = json.loads(raw.strip())
-                if rec.get("type") == "session_meta":
+                if rec.get("type") == "session_meta" and not found_session_meta:
                     payload = rec.get("payload", {})
-                    if payload.get("thread_source") == "subagent":
-                        return True
                     source = payload.get("source", {})
-                    return bool(isinstance(source, dict) and "subagent" in source)
-            except Exception:
-                pass
-    return False
-
-
-def _first_user_message(path: Path) -> str:
-    """Return the first user message text, truncated to 80 chars."""
-    with path.open() as fh:
-        for raw in fh:
-            try:
-                rec = json.loads(raw.strip())
-                if (
-                    rec.get("type") == "event_msg"
+                    is_subagent = payload.get("thread_source") == "subagent" or (
+                        isinstance(source, dict) and "subagent" in source
+                    )
+                    found_session_meta = True
+                elif (
+                    not title
+                    and rec.get("type") == "event_msg"
                     and rec.get("payload", {}).get("type") == "user_message"
                 ):
-                    msg: str = rec["payload"].get("message", "")
-                    return msg.replace("\n", " ")[:80]
+                    message: str = rec["payload"].get("message", "")
+                    title = message.replace("\n", " ")[:80]
             except Exception:
                 pass
-    return ""
+            if found_session_meta and title:
+                break
+
+    return SessionMetadata(title=title, is_subagent=is_subagent)
+
+
+def is_subagent(path: Path) -> bool:
+    """Return True if this Codex session is a guardian/subagent session."""
+    return session_metadata(path).is_subagent
 
 
 def _session_id_from_path(path: Path) -> str:
@@ -63,7 +74,8 @@ def list_sessions(*, include_subagents: bool = False) -> list[SessionMeta]:
     )
     results = []
     for f in files:
-        if not include_subagents and is_subagent(f):
+        metadata = session_metadata(f)
+        if not include_subagents and metadata.is_subagent:
             continue
         stat = f.stat()
         results.append(
@@ -73,7 +85,7 @@ def list_sessions(*, include_subagents: bool = False) -> list[SessionMeta]:
                 path=f,
                 mtime=stat.st_mtime,
                 size_kb=stat.st_size // 1024,
-                title=_first_user_message(f),
+                title=metadata.title,
             )
         )
     return results
@@ -93,11 +105,23 @@ def read_turns(path: Path, *, tail: int | None = None) -> list[Turn]:
     Returns:
         List of Turn namedtuples in conversation order.
     """
-    turns: list[Turn] = []
-    last_assistant_text: str | None = None
+    turns, _offset = read_turns_from(path, offset=0)
+    return _apply_tail(turns, tail)
 
-    with path.open() as fh:
+
+def read_turns_from(
+    path: Path,
+    *,
+    offset: int,
+    last_assistant_text: str | None = None,
+) -> tuple[list[Turn], int]:
+    """Read complete Codex records after a safe byte offset."""
+    turns: list[Turn] = []
+
+    with path.open("rb") as fh:
+        fh.seek(offset)
         for raw in fh:
+            line_start = fh.tell() - len(raw)
             stripped = raw.strip()
             if not stripped:
                 continue
@@ -135,11 +159,11 @@ def read_turns(path: Path, *, tail: int | None = None) -> list[Turn]:
                         if text and text != last_assistant_text:
                             turns.append(Turn("AGENT", text, ts))
                             last_assistant_text = text
-
             except Exception:
-                pass
+                if not raw.endswith(b"\n"):
+                    return turns, line_start
 
-    return _apply_tail(turns, tail)
+        return turns, fh.tell()
 
 
 def _apply_tail(turns: list[Turn], tail: int | None) -> list[Turn]:

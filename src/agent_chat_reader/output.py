@@ -27,7 +27,7 @@ def fmt_ts(ts_str: str) -> str:
 def _parse_ts(ts_str: str) -> datetime | None:
     """Parse an ISO timestamp, returning None for non-ISO placeholders."""
     try:
-        return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        return datetime.fromisoformat(ts_str)
     except ValueError:
         return None
 
@@ -116,14 +116,10 @@ def print_find_result(
     hits: list[FindHit],
     *,
     max_hits: int = 4,
-    merged_count: int = 1,
 ) -> None:
     """Print a single session's find results."""
     print(f"\n{'=' * 70}")
-    merged = f"  [{merged_count} sessions]" if merged_count > 1 else ""
-    print(
-        f"[{session.source.upper()}] {session.id}  {fmt_mtime(session.mtime)}{merged}"
-    )
+    print(f"[{session.source.upper()}] {session.id}  {fmt_mtime(session.mtime)}")
     if session.title:
         print(f'  "{session.title[:60]}"')
     for role, snippet, ts in hits[:max_hits]:

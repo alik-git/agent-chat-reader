@@ -47,7 +47,11 @@ class _LogRow(NamedTuple):
     body: str
 
 
-def list_sessions(*, include_subagents: bool = False) -> list[SessionMeta]:
+def list_sessions(
+    *,
+    include_subagents: bool = False,
+    raise_errors: bool = False,
+) -> list[SessionMeta]:
     """List Codex side chats found in the runtime log database.
 
     Side chats are not normal rollout JSONL sessions. The desktop app currently
@@ -58,7 +62,7 @@ def list_sessions(*, include_subagents: bool = False) -> list[SessionMeta]:
     if not CODEX_LOGS_DB.exists():
         return []
 
-    normal_thread_ids = _normal_codex_thread_ids()
+    normal_thread_ids = normal_codex_thread_ids()
     latest_mtimes: dict[str, float] = {}
     titles: dict[str, str] = {}
 
@@ -102,6 +106,8 @@ def list_sessions(*, include_subagents: bool = False) -> list[SessionMeta]:
                 # is the earliest visible prompt we saw for that side chat.
                 titles[thread_id] = text.replace("\n", " ")[:80]
     except sqlite3.Error:
+        if raise_errors:
+            raise
         return []
 
     size_kb = CODEX_LOGS_DB.stat().st_size // 1024
@@ -133,7 +139,12 @@ def find_session(
     return matches[0] if matches else None
 
 
-def read_turns(thread_id: str, *, tail: int | None = None) -> list[Turn]:
+def read_turns(
+    thread_id: str,
+    *,
+    tail: int | None = None,
+    raise_errors: bool = False,
+) -> list[Turn]:
     """Read visible turns from a Codex side chat thread."""
     if not CODEX_LOGS_DB.exists():
         return []
@@ -178,6 +189,8 @@ def read_turns(thread_id: str, *, tail: int | None = None) -> list[Turn]:
                     turns.append(Turn("AGENT", text, _timestamp(log_row)))
                     last_assistant_text = text
     except sqlite3.Error:
+        if raise_errors:
+            raise
         return []
 
     return _apply_tail(turns, tail)
@@ -191,7 +204,7 @@ def _connect_readonly(path: Path) -> sqlite3.Connection:
     return conn
 
 
-def _normal_codex_thread_ids() -> set[str]:
+def normal_codex_thread_ids(*, raise_errors: bool = False) -> set[str]:
     """Return thread ids already represented by normal Codex rollout sessions."""
     if not CODEX_STATE_DB.exists():
         return set()
@@ -201,7 +214,56 @@ def _normal_codex_thread_ids() -> set[str]:
                 cast(str, row["id"]) for row in conn.execute("SELECT id FROM threads")
             }
     except sqlite3.Error:
+        if raise_errors:
+            raise
         return set()
+
+
+def latest_log_row_id(*, raise_errors: bool = False) -> int:
+    """Return the append-only log cursor without scanning message bodies."""
+    if not CODEX_LOGS_DB.exists():
+        return 0
+    try:
+        with _connect_readonly(CODEX_LOGS_DB) as conn:
+            row = conn.execute("SELECT COALESCE(MAX(id), 0) AS id FROM logs").fetchone()
+            return int(row["id"])
+    except sqlite3.Error:
+        if raise_errors:
+            raise
+        return 0
+
+
+def changed_thread_ids(
+    after_row_id: int,
+    *,
+    raise_errors: bool = False,
+) -> tuple[int, set[str]]:
+    """Return side-chat thread ids touched after an append-only log cursor."""
+    if not CODEX_LOGS_DB.exists():
+        return 0, set()
+    try:
+        with _connect_readonly(CODEX_LOGS_DB) as conn:
+            latest = int(
+                conn.execute("SELECT COALESCE(MAX(id), 0) AS id FROM logs").fetchone()[
+                    "id"
+                ]
+            )
+            rows = conn.execute(
+                """
+                SELECT DISTINCT thread_id
+                FROM logs
+                WHERE id > ?
+                  AND thread_id IS NOT NULL
+                  AND thread_id != ''
+                  AND target IN (?, ?)
+                """,
+                (after_row_id, _USER_SUBMISSION_TARGET, _ASSISTANT_MESSAGE_TARGET),
+            )
+            return latest, {cast(str, row["thread_id"]) for row in rows}
+    except sqlite3.Error:
+        if raise_errors:
+            raise
+        return after_row_id, set()
 
 
 def _log_row(row: sqlite3.Row) -> _LogRow:
