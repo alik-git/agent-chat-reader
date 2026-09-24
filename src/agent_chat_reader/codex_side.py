@@ -18,7 +18,7 @@ CODEX_SIDE_SOURCE = "codex-side"
 _USER_SUBMISSION_TARGET = "codex_core::session::handlers"
 _ASSISTANT_MESSAGE_TARGET = "codex_core::stream_events_utils"
 _USER_SUBMISSION_MARKER = "Submission sub=Submission"
-_USER_INPUT_MARKER = "op: UserInput"
+_USER_INPUT_MARKER = "UserInput {"
 _ASSISTANT_MESSAGE_MARKER = ":handle_output_item_done: Output item item=Message"
 
 _SUBMISSION_ID_RE = re.compile(r'Submission \{ id: "([^"]+)"')
@@ -293,9 +293,56 @@ def _extract_user_submission_text(body: str) -> str | None:
     """Extract user text chunks from a Codex `Submission` debug log row."""
     if _USER_SUBMISSION_MARKER not in body or _USER_INPUT_MARKER not in body:
         return None
-    parts = _extract_debug_strings(body, "Text { text:")
+    content = _user_input_content(body)
+    parts = _extract_debug_strings(content, "Text { text:")
     text = "".join(parts).strip()
     return text or None
+
+
+def _user_input_content(body: str) -> str:
+    """Limit extraction to the input array, excluding request metadata/context."""
+    start = body.find(_USER_INPUT_MARKER)
+    match = re.search(r"(?:items|content):\s*\[", body[start:])
+    if match is None:
+        return ""
+    start += match.end() - 1
+    depth = 0
+    index = start
+    while index < len(body):
+        char = body[index]
+        if char == '"':
+            value, index = _parse_debug_string(body, index)
+            if value is None:
+                return ""
+            continue
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth == 0:
+                return body[start : index + 1]
+        index += 1
+    return ""
+
+
+def has_unavailable_assistant_text(thread_id: str | None = None) -> bool:
+    """Detect modern ID-only message logs whose text cannot be reconstructed."""
+    if not CODEX_LOGS_DB.exists():
+        return False
+    query = """
+        SELECT DISTINCT thread_id FROM logs
+        WHERE target = ? AND feedback_log_body LIKE ?
+    """
+    params = [_ASSISTANT_MESSAGE_TARGET, '%Output item item_type="message"%']
+    if thread_id is not None:
+        query += " AND thread_id = ?"
+        params.append(thread_id)
+    normal_ids = normal_codex_thread_ids() if thread_id is None else set()
+    with _connect_readonly(CODEX_LOGS_DB) as conn:
+        return any(
+            row["thread_id"] and row["thread_id"] not in normal_ids
+            for row in conn.execute(query, params)
+        )
 
 
 def _extract_assistant_message_text(body: str) -> str | None:

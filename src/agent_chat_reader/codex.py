@@ -35,13 +35,10 @@ def session_metadata(path: Path) -> SessionMetadata:
                         isinstance(source, dict) and "subagent" in source
                     )
                     found_session_meta = True
-                elif (
-                    not title
-                    and rec.get("type") == "event_msg"
-                    and rec.get("payload", {}).get("type") == "user_message"
-                ):
-                    message: str = rec["payload"].get("message", "")
-                    title = message.replace("\n", " ")[:80]
+                elif not title:
+                    turn = _event_turn(rec)
+                    if turn is not None and turn.role == "USER":
+                        title = turn.text.replace("\n", " ")[:80]
             except Exception:
                 pass
             if found_session_meta and title:
@@ -128,34 +125,21 @@ def read_turns_from(
             try:
                 rec = json.loads(stripped)
                 t = rec.get("type", "")
-                pt = rec.get("payload", {}).get("type", "")
                 ts: str = rec.get("timestamp", "")
-
-                if t == "event_msg" and pt == "user_message":
-                    msg = rec["payload"].get("message", "").strip()
-                    if msg:
-                        turns.append(Turn("USER", msg, ts))
+                turn = _event_turn(rec)
+                if turn is not None:
+                    if turn.role == "USER":
+                        turns.append(turn)
                         last_assistant_text = None
-
-                elif t == "event_msg" and pt == "agent_message":
-                    msg = rec["payload"].get("message", "").strip()
-                    if msg and msg != last_assistant_text:
-                        turns.append(Turn("AGENT", msg, ts))
-                        last_assistant_text = msg
-
+                    elif turn.text != last_assistant_text:
+                        turns.append(turn)
+                        last_assistant_text = turn.text
                 elif t == "response_item":
-                    role = rec.get("payload", {}).get("role", "")
-                    if role == "assistant":
-                        content = rec.get("payload", {}).get("content", [])
-                        text = ""
-                        if isinstance(content, str):
-                            text = content.strip()
-                        elif isinstance(content, list):
-                            text = "\n".join(
-                                b.get("text", "")
-                                for b in content
-                                if isinstance(b, dict) and b.get("type") == "text"
-                            ).strip()
+                    payload = rec.get("payload", {})
+                    if payload.get("role") == "assistant" and payload.get(
+                        "channel"
+                    ) in (None, "commentary", "final"):
+                        text = _content_text(payload.get("content", []))
                         if text and text != last_assistant_text:
                             turns.append(Turn("AGENT", text, ts))
                             last_assistant_text = text
@@ -164,6 +148,44 @@ def read_turns_from(
                     return turns, line_start
 
         return turns, fh.tell()
+
+
+def _content_text(content: object) -> str:
+    """Extract visible text blocks without images, reasoning or tool payloads."""
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        block["text"]
+        for block in content
+        if isinstance(block, dict)
+        and block.get("type") in {"text", "Text", "input_text", "output_text"}
+        and isinstance(block.get("text"), str)
+    ).strip()
+
+
+def _event_turn(record: dict) -> Turn | None:
+    """Read canonical user/agent events, including current completed items.
+
+    User response items also contain injected context and replayed history, so
+    only canonical user events count as real user turns.
+    """
+    if record.get("type") != "event_msg":
+        return None
+    payload = record.get("payload", {})
+    kind = payload.get("type")
+    role = {"user_message": "USER", "agent_message": "AGENT"}.get(kind)
+    text = payload.get("message", "") if role else ""
+    if kind == "item_completed":
+        item = payload.get("item", {})
+        role = {"UserMessage": "USER", "AgentMessage": "AGENT"}.get(item.get("type"))
+        if role == "AGENT" and item.get("phase") not in (None, "commentary", "final"):
+            return None
+        text = _content_text(item.get("content", [])) if role else ""
+    if role and isinstance(text, str) and text.strip():
+        return Turn(role, text.strip(), record.get("timestamp", ""))
+    return None
 
 
 def _apply_tail(turns: list[Turn], tail: int | None) -> list[Turn]:
