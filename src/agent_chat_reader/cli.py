@@ -147,10 +147,11 @@ def _side_history_warnings(thread_id: str | None = None) -> list[str]:
     """Explain missing source content without inventing assistant messages."""
     if not codex_side.has_unavailable_assistant_text(thread_id):
         return []
-    return [
+    warning = (
         "Some Codex side-chat message text was not stored in the runtime logs "
         "(only message IDs). Available turns/search results may be incomplete."
-    ]
+    )
+    return [warning]
 
 
 def cmd_find(
