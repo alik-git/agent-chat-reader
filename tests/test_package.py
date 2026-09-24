@@ -1071,3 +1071,230 @@ def test_cli_no_args_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
     """Calling main() with no args prints help and exits 0."""
     assert main([]) == 0
     assert "agent-chat-reader" in capsys.readouterr().out
+
+
+def _completed_message(kind: str, text: str, *, phase: str | None = None) -> dict:
+    """Model current Codex UI events without private fixture data."""
+    return {
+        "type": "event_msg",
+        "timestamp": "2026-09-23T00:00:00Z",
+        "payload": {
+            "type": "item_completed",
+            "item": {
+                "type": kind,
+                "id": "message-id",
+                "phase": phase,
+                "content": [
+                    {"type": "Text" if kind == "AgentMessage" else "text", "text": text}
+                ],
+            },
+        },
+    }
+
+
+def test_current_codex_messages_titles_tail_and_dedup(tmp_path: Path) -> None:
+    path = tmp_path / _SESSION_FILE
+    _write_jsonl(
+        path,
+        [
+            {"type": "session_meta", "payload": {"source": "vscode"}},
+            {
+                "type": "response_item",
+                "payload": {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "injected context"}],
+                },
+            },
+            _completed_message("UserMessage", "first question"),
+            _completed_message("AgentMessage", "first answer", phase="final"),
+            {
+                "type": "response_item",
+                "payload": {
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "first answer"}],
+                },
+            },
+            _completed_message("UserMessage", "second question"),
+            _completed_message("AgentMessage", "private reasoning", phase="analysis"),
+            {
+                "type": "response_item",
+                "payload": {
+                    "role": "assistant",
+                    "channel": "analysis",
+                    "content": [{"type": "output_text", "text": "private reasoning"}],
+                },
+            },
+            _completed_message("AgentMessage", "second answer", phase="final"),
+        ],
+    )
+    assert codex.session_metadata(path).title == "first question"
+    assert [(t.role, t.text) for t in read_turns(path)] == [
+        ("USER", "first question"),
+        ("AGENT", "first answer"),
+        ("USER", "second question"),
+        ("AGENT", "second answer"),
+    ]
+    assert [t.text for t in read_turns(path, tail=1)] == [
+        "second question",
+        "second answer",
+    ]
+
+
+def test_current_codex_output_text_without_completed_event(tmp_path: Path) -> None:
+    path = tmp_path / _SESSION_FILE
+    _write_jsonl(
+        path,
+        [
+            {
+                "type": "response_item",
+                "payload": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "visible"},
+                        {"type": "image", "text": "not visible"},
+                    ],
+                },
+            }
+        ],
+    )
+    assert [t.text for t in read_turns(path)] == ["visible"]
+
+
+def test_current_codex_incremental_duplicate_boundary(tmp_path: Path) -> None:
+    path = tmp_path / _SESSION_FILE
+    _write_jsonl(path, [_completed_message("AgentMessage", "one answer")])
+    turns, offset = codex.read_turns_from(path, offset=0)
+    with path.open("a") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "one answer"}],
+                    },
+                }
+            )
+            + "\n"
+        )
+    appended, _ = codex.read_turns_from(
+        path, offset=offset, last_assistant_text=turns[-1].text
+    )
+    assert appended == []
+
+
+def _current_submission(text: str, *, submission_id: str = "sub-modern") -> str:
+    return (
+        f'Submission sub=Submission {{ id: "{submission_id}", op: TurnInput {{ '
+        "request: TurnInputRequest { input: UserInput { content: ["
+        f'Text {{ text: "{_debug_escape(text)}", text_elements: [] }}'
+        '] }, additional_context: { Text { text: "not a user message" } } } } }'
+    )
+
+
+def test_current_side_submission_read_and_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, db = _patch_all_search_sources(monkeypatch, tmp_path)
+    _insert_log(
+        db,
+        row_id=1,
+        thread_id="modern-side",
+        target="codex_core::session::handlers",
+        body=_current_submission('hello [nested] "world"\nside query'),
+    )
+    assert codex_side.list_sessions()[0].id == "modern-side"
+    assert [t.text for t in codex_side.read_turns("modern-side")] == [
+        'hello [nested] "world"\nside query'
+    ]
+    options = {
+        "sources": ("codex-side",),
+        "include_subagents": False,
+        "limit": 5,
+        "since": None,
+    }
+    assert search.search_sessions(["side query"], **options)
+    _insert_log(
+        db,
+        row_id=2,
+        thread_id="modern-side",
+        target="codex_core::session::handlers",
+        body=_current_submission("appended question", submission_id="sub-next"),
+    )
+    assert search.search_sessions(["appended question"], **options)
+
+
+def test_current_side_helpers_still_hidden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db, _ = _patch_codex_side_paths(monkeypatch, tmp_path)
+    _insert_log(
+        db,
+        row_id=1,
+        thread_id="helper",
+        target="codex_core::session::handlers",
+        body=_current_submission(
+            "The following is the Codex agent history whose request action you are assessing"
+        ),
+    )
+    assert codex_side.list_sessions() == []
+    assert len(codex_side.list_sessions(include_subagents=True)) == 1
+
+
+def test_current_side_missing_text_warning_json_and_search(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _, db = _patch_all_search_sources(monkeypatch, tmp_path)
+    _insert_log(
+        db,
+        row_id=1,
+        thread_id="modern-side",
+        target="codex_core::session::handlers",
+        body=_current_submission("find this question"),
+    )
+    _insert_log(
+        db,
+        row_id=2,
+        thread_id="modern-side",
+        target="codex_core::stream_events_utils",
+        body='Output item item_type="message" item_id="msg-only-id"',
+    )
+    assert main(["modern-side", "--format", "json"]) == 0
+    output = capsys.readouterr()
+    payload = json.loads(output.out)
+    assert payload["total_turns"] == 1
+    assert "not stored" in payload["warnings"][0]
+    assert "Warning:" in output.err
+    assert main(["--find", "absent", "--source", "codex-side"]) == 0
+    output = capsys.readouterr()
+    assert "incomplete" in output.err
+    assert "No sessions found" in output.out
+
+
+def test_parser_upgrade_rebuilds_old_empty_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_chat_reader import search_index
+
+    sessions, _ = _patch_all_search_sources(monkeypatch, tmp_path)
+    path = sessions / _SESSION_FILE
+    _write_jsonl(path, [_completed_message("UserMessage", "new format searchable")])
+    index = search_index.default_index_path()
+    with search_index.open_index(index) as conn:
+        conn.execute("PRAGMA user_version = 3")
+        conn.execute("INSERT INTO metadata VALUES ('old-cursor', '1000')")
+    results = search.search_sessions(
+        ["new format searchable"],
+        sources=("codex",),
+        include_subagents=False,
+        limit=5,
+        since=None,
+    )
+    assert len(results) == 1
+    assert results[0].session.title == "new format searchable"
+    with sqlite3.connect(index) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert (
+            conn.execute("SELECT value FROM metadata WHERE key='old-cursor'").fetchone()
+            is None
+        )

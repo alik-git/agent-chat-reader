@@ -143,6 +143,17 @@ def cmd_list(
     return 0
 
 
+def _side_history_warnings(thread_id: str | None = None) -> list[str]:
+    """Explain missing source content without inventing assistant messages."""
+    if not codex_side.has_unavailable_assistant_text(thread_id):
+        return []
+    warning = (
+        "Some Codex side-chat message text was not stored in the runtime logs "
+        "(only message IDs). Available turns/search results may be incomplete."
+    )
+    return [warning]
+
+
 def cmd_find(
     keywords: list[str],
     *,
@@ -153,6 +164,9 @@ def cmd_find(
 ) -> int:
     """Search the incremental index with session-level AND semantics."""
     try:
+        if _include_codex_side_chats(source_filter):
+            for warning in _side_history_warnings():
+                print(f"Warning: {warning}", file=sys.stderr)
         results = search.search_sessions(
             keywords,
             sources=_search_sources(source_filter),
@@ -197,6 +211,13 @@ def cmd_read(
         tail=tail,
     )
 
+    warnings = (
+        _side_history_warnings(session.id)
+        if session.source == codex_side.CODEX_SIDE_SOURCE
+        else []
+    )
+    for warning in warnings:
+        print(f"Warning: {warning}", file=sys.stderr)
     if output_format == "json":
         print(
             _json_session(
@@ -205,6 +226,7 @@ def cmd_read(
                 path=session.path,
                 size_kb=session.size_kb,
                 turns=turns,
+                warnings=warnings,
             )
         )
         return 0
@@ -256,6 +278,7 @@ def _json_session(
     size_kb: int,
     turns: list[Turn],
     session_id: str | None = None,
+    warnings: list[str] | None = None,
 ) -> str:
     """Serialize a read session as structured JSON."""
     previous_turn = None
@@ -285,6 +308,8 @@ def _json_session(
         "total_turns": len(turns),
         "turns": turn_records,
     }
+    if warnings:
+        payload["warnings"] = warnings
     return json.dumps(payload, indent=2)
 
 

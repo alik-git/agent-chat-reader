@@ -12,7 +12,7 @@ from typing import NamedTuple
 from agent_chat_reader import claude, codex, codex_side
 from agent_chat_reader.models import SessionMeta, Turn
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _CACHE_ENV = "AGENT_CHAT_READER_CACHE_DIR"
 
 

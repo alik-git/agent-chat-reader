@@ -60,7 +60,7 @@ agent-chat-reader 019eaecb --format json
 
 The raw JSONL files are very noisy. This tool extracts only:
 
-- **Codex**: `user_message` events, `agent_message` events, and full `response_item` assistant text. Guardian/subagent sessions (auto-approval bots) are hidden by default.
+- **Codex**: `user_message` / `agent_message` events, current `item_completed` user/agent messages, and `text` / `output_text` assistant response blocks. User response items containing injected context or replayed history are excluded. Guardian/subagent sessions (auto-approval bots) are hidden by default.
 - **Codex side chats**: user submissions and assistant text reconstructed from the local Codex runtime log database. Known internal helper sessions are hidden by default.
 - **Claude Code**: real user turns (not tool-result carriers), and assistant text blocks (not thinking blocks or tool calls). Sidechain sub-agent turns are hidden by default.
 
@@ -102,7 +102,16 @@ The derived search index defaults to
 `AGENT_CHAT_READER_CACHE_DIR` to place it under a different cache root.
 
 Codex side chats are log-backed rather than normal rollout transcripts, so the
-tool labels them as `codex-side` in list and search output.
+tool labels them as `codex-side` in list and search output. Both legacy `UserInput`
+and current `TurnInput` submissions are supported. Some Codex versions log only
+assistant message IDs, without the message text. That missing text cannot be
+recovered from these logs: reads/searches warn when such records are detected,
+and JSON reads include a `warnings` field. A search with no matches is not proof
+that a phrase was never said when this warning appears.
+
+After upgrading from 0.1.6, the disposable search index automatically rebuilds
+once so chats skipped by the old parser become searchable. Source histories are
+never modified.
 
 ## Development
 
